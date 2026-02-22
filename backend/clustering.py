@@ -117,7 +117,42 @@ def run_kmeans(driver, n_clusters=4, use_llm=False):
     return dict(zip(emails, [int(l) for l in labels]))
 
 
-def run_louvain(driver, use_llm=False, silent=False):
+def merge_singleton_clusters(G, partition, min_size=2):
+    """
+    Reassign nodes in singleton clusters (size 1) to the cluster of the neighbor
+    they have the strongest connection to. Reduces many one-person "clusters."
+    Returns partition with contiguous cluster ids 0..n_clusters-1.
+    """
+    emails = list(partition.keys())
+    # Build clusters by unique id (Louvain may use 0,1,2,... or sparse ids)
+    id_to_members = {}
+    for e in emails:
+        cid = partition[e]
+        id_to_members.setdefault(cid, []).append(e)
+
+    singletons = [cid for cid, members in id_to_members.items() if len(members) < min_size]
+    if not singletons:
+        return partition
+
+    email_to_label = dict(partition)
+    for cid in singletons:
+        for email in id_to_members[cid]:
+            neighbors = list(G.neighbors(email))
+            if not neighbors:
+                continue
+            best = max(
+                neighbors,
+                key=lambda n: G.edges.get((email, n), G.edges.get((n, email), {})).get("weight", 1),
+            )
+            email_to_label[email] = email_to_label[best]
+
+    # Renumber to contiguous 0..n_clusters-1 for downstream (cluster_names[cid], etc.)
+    unique_ids = sorted(set(email_to_label.values()))
+    old_to_new = {old: i for i, old in enumerate(unique_ids)}
+    return {e: old_to_new[email_to_label[e]] for e in emails}
+
+
+def run_louvain(driver, use_llm=False, silent=False, merge_singletons=True, resolution=1.0):
     """Run Louvain community detection, assign category names, and write back to Neo4j."""
     if not silent:
         print("Running Louvain community detection...")
@@ -125,7 +160,12 @@ def run_louvain(driver, use_llm=False, silent=False):
     nodes, edges = fetch_graph_data(driver)
     G = build_networkx_graph(nodes, edges)
 
-    partition = community_louvain.best_partition(G, weight="weight", random_state=42)
+    partition = community_louvain.best_partition(
+        G, weight="weight", random_state=42, resolution=resolution
+    )
+
+    if merge_singletons:
+        partition = merge_singleton_clusters(G, partition, min_size=2)
 
     emails = list(partition.keys())
     labels = [partition[e] for e in emails]

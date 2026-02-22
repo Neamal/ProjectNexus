@@ -652,7 +652,6 @@ export default function GraphView({
       nodeId="id"
       nodeCanvasObject={paintNode}
       onRenderFramePre={showClusters ? undefined : onRenderFramePre as any}
-      minZoom={showClusters ? undefined : 0.5}
       onEngineStop={handleEngineStop}
       nodePointerAreaPaint={(node, color, ctx) => {
         const gNode = node as unknown as GraphNode;
