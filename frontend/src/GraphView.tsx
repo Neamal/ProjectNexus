@@ -653,7 +653,7 @@ export default function GraphView({
         }}
         linkWidth={(link) => {
           const count = (link as unknown as GraphLink).count ?? 1;
-          return Math.sqrt(count) * (showClusters ? 1.5 : 0.8);
+          return Math.sqrt(count) * (showClusters ? 2.0 : 1.4);
         }}
         linkCurvature={0.03}
       />
