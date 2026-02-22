@@ -2,7 +2,8 @@ fastapi==0.*
 uvicorn==0.*
 neo4j==5.*
 python-dotenv==1.*
-numpy>=1.*
-scikit-learn>=1.*
-networkx>=3.*
-python-louvain>=0.*
+numpy>=1.0
+scikit-learn>=1.0
+networkx>=3.0
+python-louvain>=0.0
+openai==1.*

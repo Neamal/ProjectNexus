@@ -1,4 +1,4 @@
-import { useCallback, useRef, useEffect, useMemo } from "react";
+import { useCallback, useRef, useEffect, useMemo, useState } from "react";
 import ForceGraph2D, {
   type ForceGraphMethods,
   type NodeObject,
@@ -11,6 +11,7 @@ interface GraphNode {
   cluster?: number;
   isClusterNode?: boolean;
   memberCount?: number;
+  degree?: number;
 }
 
 interface GraphLink {
@@ -50,110 +51,213 @@ const NOTE_FILLS = [
 interface Props {
   nodes: GraphNode[];
   links: GraphLink[];
-  selectedNode: string | null;
-  onNodeClick: (email: string) => void;
+  selectedNodes: Set<string>;
+  onNodeClick: (email: string, isShift: boolean) => void;
+  onNodesSelect: (ids: string[]) => void;
   onLinkClick: (source: string, target: string) => void;
+  onBackgroundClick: () => void;
   width: number;
   height: number;
   showClusters?: boolean;
+  resetLayoutSignal?: number;
+  boxSelectEnabled?: boolean;
 }
 
 export default function GraphView({
   nodes,
   links,
-  selectedNode,
+  selectedNodes,
   onNodeClick,
+  onNodesSelect,
   onLinkClick,
+  onBackgroundClick,
   width,
   height,
   showClusters = false,
+  resetLayoutSignal,
+  boxSelectEnabled = false,
 }: Props) {
   const fgRef = useRef<ForceGraphMethods<NodeObject>>(undefined);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [selectionBox, setSelectionBox] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+
+  const [isReady, setIsReady] = useState(false);
 
   const hasClusterNodes = nodes.some((n) => n.isClusterNode);
 
-  // ── Compute board extent based on node count & spread ──
   const boardExtent = useMemo(() => {
     if (showClusters) return null;
     const n = nodes.length;
-    // Each sticky note is ~64 world-units wide; allow generous spacing
-    // Base size grows with sqrt of node count for reasonable density
     const baseHalf = Math.max(200, 80 * Math.sqrt(n));
     return { half: baseHalf };
   }, [nodes.length, showClusters]);
+
+  const maxDegree = useMemo(() => {
+    if (nodes.length === 0) return 1;
+    return Math.max(1, ...nodes.map(n => n.degree ?? 0));
+  }, [nodes]);
+
+  const settled = useRef(false);
+  const userInteracted = useRef(false);
+  const lastResetSignal = useRef<number | undefined>(resetLayoutSignal);
+
+  useMemo(() => {
+    const limit = (boardExtent && boardExtent.half) ? boardExtent.half : 400;
+    const clusterMap = new Map<number, GraphNode[]>();
+    nodes.forEach(n => {
+      const c = n.cluster ?? 0;
+      if (!clusterMap.has(c)) clusterMap.set(c, []);
+      clusterMap.get(c)!.push(n);
+    });
+
+    const clusters = Array.from(clusterMap.keys());
+    const clusterCount = clusters.length;
+
+    for (const node of nodes as (GraphNode & { fx?: number; fy?: number; x?: number; y?: number })[]) {
+      if (node.x == null || node.y == null) {
+        const cIdx = clusters.indexOf(node.cluster ?? 0);
+        const clusterAngle = (cIdx / Math.max(1, clusterCount)) * Math.PI * 2;
+        const clusterRadius = limit * 0.4;
+        const cx = Math.cos(clusterAngle) * clusterRadius;
+        const cy = Math.sin(clusterAngle) * clusterRadius;
+
+        node.x = cx + (Math.random() * 2 - 1) * 50;
+        node.y = cy + (Math.random() * 2 - 1) * 50;
+      }
+
+      node.fx = undefined;
+      node.fy = undefined;
+      (node as any).__userPinned = false;
+    }
+    settled.current = false;
+  }, [nodes, boardExtent]);
 
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg) return;
 
     if (hasClusterNodes) {
-      fg.d3Force("charge")?.strength(-400);
-      fg.d3Force("link")
-        ?.distance((link: any) => {
-          const count = link.count ?? 1;
-          return Math.max(100, 300 - count * 1.5);
-        });
-      // Remove bounding force in cluster mode
-      fg.d3Force("bound", null);
+      fg.d3Force("charge")?.strength(-450).distanceMax(700);
+      fg.d3Force("link")?.distance((link: any) => {
+        const count = link.count ?? 1;
+        return Math.max(40, 500 - Math.sqrt(count) * 90);
+      }).strength((link: any) => {
+        const count = link.count ?? 1;
+        // Stronger connections pull harder to contract (up to 0.4)
+        return 0.1 + Math.min(0.3, Math.sqrt(count) / 10);
+      });
     } else {
-      fg.d3Force("charge")?.strength(-250);
-      fg.d3Force("link")
-        ?.distance((link: any) => {
-          const count = link.count ?? 1;
-          return Math.max(60, 200 - count * 0.8);
-        });
+      fg.d3Force("charge")?.strength(-1100).distanceMax(1100);
+      fg.d3Force("link")?.distance((link: any) => {
+        const count = link.count ?? 1;
+        return Math.max(70, 680 - Math.sqrt(count) * 130);
+      }).strength((link: any) => {
+        const count = link.count ?? 1;
+        // Strong hubs contract more firmly (up to 0.35)
+        return 0.06 + Math.min(0.29, Math.sqrt(count) / 15);
+      });
 
-      // ── Bounding force: keep nodes inside the cork area ──
+      fg.d3Force("center", () => {
+        for (const node of nodes as (GraphNode & { x?: number; y?: number; vx?: number; vy?: number })[]) {
+          if (node.x != null && node.y != null) {
+            node.vx = (node.vx ?? 0) - node.x * 0.0035;
+            node.vy = (node.vy ?? 0) - node.y * 0.0035;
+          }
+        }
+      });
+
       if (boardExtent) {
         const bHalf = boardExtent.half;
-        const pad = 40; // margin from edge
+        const pad = 60;
         const limit = bHalf - pad;
         fg.d3Force("bound", () => {
           for (const node of nodes as (GraphNode & { x?: number; y?: number; vx?: number; vy?: number })[]) {
             if (node.isClusterNode) continue;
-            if (node.x != null && node.x > limit) { node.vx = (node.vx ?? 0) - 0.5; }
-            if (node.x != null && node.x < -limit) { node.vx = (node.vx ?? 0) + 0.5; }
-            if (node.y != null && node.y > limit) { node.vy = (node.vy ?? 0) - 0.5; }
-            if (node.y != null && node.y < -limit) { node.vy = (node.vy ?? 0) + 0.5; }
+            if (node.x != null && node.x > limit) { node.vx = (node.vx ?? 0) - 0.2; }
+            if (node.x != null && node.x < -limit) { node.vx = (node.vx ?? 0) + 0.2; }
+            if (node.y != null && node.y > limit) { node.vy = (node.vy ?? 0) - 0.2; }
+            if (node.y != null && node.y < -limit) { node.vy = (node.vy ?? 0) + 0.2; }
           }
         });
       }
     }
 
-    fg.d3ReheatSimulation();
-  }, [hasClusterNodes, boardExtent, nodes]);
+    // Custom force to brutally enforce a completely static layout.
+    // If settled.current is true, we overwrite velocity and clamp positions every tick.
+    // This absolutely guarantees ZERO physics movements after the initial layout.
+    fg.d3Force("pinClamp", () => {
+      if (!settled.current) return;
+      for (const node of nodes as (GraphNode & { _fx?: number; _fy?: number; fx?: number; fy?: number; x?: number; y?: number; vx?: number; vy?: number; __userPinned?: boolean })[]) {
+        node.vx = 0;
+        node.vy = 0;
+        if (node.fx != null) node.x = node.fx;
+        else if (node.x != null) {
+          // Backup enforcement in case the library nulled fx (e.g., during click)
+          node.fx = node.x;
+        }
+        if (node.fy != null) node.y = node.fy;
+        else if (node.y != null) {
+          node.fy = node.y;
+        }
+      }
+    });
 
-  // ── After engine stops, freeze all node positions & fit view ──
-  const settled = useRef(false);
-  useEffect(() => {
-    settled.current = false;
-    // Unpin nodes so new layout can run
-    for (const node of nodes as (GraphNode & { fx?: number; fy?: number })[]) {
-      node.fx = undefined;
-      node.fy = undefined;
-    }
-  }, [nodes.length, showClusters]);
+
+  }, [hasClusterNodes, boardExtent, nodes]);
 
   const handleEngineStop = useCallback(() => {
     if (settled.current) return;
     settled.current = true;
-    const fg = fgRef.current;
-    if (!fg) return;
-
-    // Pin every node so they never move again on zoom / pan
     for (const node of nodes as (GraphNode & { x?: number; y?: number; fx?: number; fy?: number })[]) {
       if (node.x != null) node.fx = node.x;
       if (node.y != null) node.fy = node.y;
+      (node as any).__userPinned = true;
     }
 
-    if (!showClusters) {
-      fg.zoomToFit(400, 60);
+    const fg = fgRef.current;
+    if (fg && !userInteracted.current) {
+      fg.zoomToFit(400, 150);
+      // Wait a bit for the zoom to finish before showing
+      setTimeout(() => setIsReady(true), 400);
+    } else {
+      setIsReady(true);
     }
-  }, [nodes, showClusters]);
+  }, [nodes, boardExtent, width, height]);
+
+  const graphData = useMemo(() => {
+    return { nodes, links, _signal: resetLayoutSignal };
+  }, [nodes, links, resetLayoutSignal]);
+
+  useEffect(() => {
+    if (resetLayoutSignal == null || resetLayoutSignal === lastResetSignal.current) {
+      lastResetSignal.current = resetLayoutSignal;
+      return;
+    }
+    lastResetSignal.current = resetLayoutSignal;
+    userInteracted.current = false;
+    settled.current = false;
+
+    for (const node of nodes as (GraphNode & { fx?: number; fy?: number; x?: number; y?: number })[]) {
+      node.fx = undefined;
+      node.fy = undefined;
+      (node as any).__userPinned = false;
+      const kick = 10;
+      node.x = (node.x ?? 0) + (Math.random() * 2 - 1) * kick;
+      node.y = (node.y ?? 0) + (Math.random() * 2 - 1) * kick;
+    }
+  }, [resetLayoutSignal, nodes]);
+
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (fg && !userInteracted.current) {
+      fg.zoomToFit(400, 150);
+    }
+  }, [boardExtent, width, height]);
 
   const handleClick = useCallback(
-    (node: NodeObject) => {
-      if (node.id) onNodeClick(node.id as string);
+    (node: NodeObject, event: any) => {
+      // Pass event.shiftKey if available
+      if (node.id) onNodeClick(node.id as string, event.shiftKey);
     },
     [onNodeClick]
   );
@@ -167,16 +271,103 @@ export default function GraphView({
     [onLinkClick]
   );
 
+  const handleNodeDrag = useCallback((node: NodeObject, translate: { x: number; y: number }) => {
+    userInteracted.current = true;
+    if (!settled.current) handleEngineStop();
+
+    if (!selectedNodes.has(node.id as string)) {
+      if (selectedNodes.size > 0) {
+        onNodesSelect([node.id as string]);
+      }
+      return;
+    }
+
+    selectedNodes.forEach(id => {
+      if (id === node.id) return; // Library already translated the dragged node natively
+      const n = (nodes as any).find((gn: any) => gn.id === id);
+      if (n) {
+        n.x = (n.x || 0) + translate.x;
+        n.y = (n.y || 0) + translate.y;
+        n.fx = n.x;
+        n.fy = n.y;
+        n.vx = 0;
+        n.vy = 0;
+        (n as any).__userPinned = true;
+      }
+    });
+  }, [nodes, selectedNodes, handleEngineStop, onNodesSelect]);
+
+  const handleNodeDragEnd = useCallback((node: NodeObject) => {
+    const targets = selectedNodes.has(node.id as string) ? Array.from(selectedNodes) : [node.id as string];
+    // setTimeout ensures we re-pin the node AFTER react-force-graph-2d sets node.fx = null internally
+    setTimeout(() => {
+      targets.forEach(id => {
+        const n = (nodes as any).find((gn: any) => gn.id === id);
+        if (n) {
+          n.vx = 0; n.vy = 0;
+          n.fx = n.x; n.fy = n.y;
+          (n as any).__userPinned = true;
+        }
+      });
+    }, 0);
+  }, [nodes, selectedNodes]);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (!boxSelectEnabled) return;
+    if (containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      setSelectionBox({ x1: x, y1: y, x2: x, y2: y });
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!boxSelectEnabled && selectionBox) {
+      setSelectionBox(null);
+      return;
+    }
+    if (selectionBox && containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      setSelectionBox(prev => prev ? { ...prev, x2: x, y2: y } : null);
+    }
+  };
+
+  const handleMouseUp = () => {
+    if (selectionBox) {
+      if (boxSelectEnabled) {
+        const { x1, y1, x2, y2 } = selectionBox;
+        // Only trigger selection if the box has some size (prevent mis-clicks)
+        const dist = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+        if (dist > 5) {
+          const fg = fgRef.current;
+          if (fg) {
+            const selectedIds: string[] = [];
+            nodes.forEach((node: any) => {
+              const { x, y } = fg.graph2ScreenCoords(node.x, node.y);
+              if (x >= Math.min(x1, x2) && x <= Math.max(x1, x2) && y >= Math.min(y1, y2) && y <= Math.max(y1, y2)) {
+                selectedIds.push(node.id);
+              }
+            });
+            onNodesSelect(selectedIds);
+          }
+        }
+      }
+      setSelectionBox(null);
+    }
+  };
+
   const paintNode = useCallback(
     (node: NodeObject, ctx: CanvasRenderingContext2D, globalScale: number) => {
       const gNode = node as unknown as GraphNode;
       const label = gNode.name ?? (node.id as string);
-      const isSelected = node.id === selectedNode;
+      const isSelected = selectedNodes.has(node.id as string);
       const ci = (gNode.cluster ?? 0) % CLUSTER_COLORS.length;
       const clusterColor = CLUSTER_COLORS[ci];
 
       if (gNode.isClusterNode) {
-        // ── Hexagonal super-node (clusters tab) ──
         const size = 14 + (gNode.memberCount ?? 3) * 1.5;
         const sides = 6;
         ctx.beginPath();
@@ -201,22 +392,23 @@ export default function GraphView({
         ctx.fillStyle = clusterColor;
         ctx.fillText(label, node.x!, node.y!);
       } else if (!showClusters) {
-        // ── Sticky-note card (graph tab / cork board) ──
-        const noteW = 64 / globalScale;
-        const noteH = 52 / globalScale;
+        // cappedScale stops things from staying "fixed screen-size" forever
+        // Once zoom exceeds 1.0x, the icons and font start growing with the zoom
+        const cappedScale = Math.min(globalScale, 1.0);
+        const sizeScale = 0.8 + 1.2 * Math.pow((gNode.degree ?? 0) / maxDegree, 0.5);
+        const noteW = (64 * sizeScale) / cappedScale;
+        const noteH = (52 * sizeScale) / cappedScale;
         const x = node.x! - noteW / 2;
         const y = node.y! - noteH / 2;
         const noteFill = NOTE_FILLS[ci];
-        const cornerFold = 8 / globalScale;
+        const cornerFold = (8 * sizeScale) / cappedScale;
 
-        // Shadow
         ctx.save();
         ctx.shadowColor = "rgba(0,0,0,0.35)";
-        ctx.shadowBlur = 6 / globalScale;
-        ctx.shadowOffsetX = 2 / globalScale;
-        ctx.shadowOffsetY = 3 / globalScale;
+        ctx.shadowBlur = (6 * sizeScale) / cappedScale;
+        ctx.shadowOffsetX = (2 * sizeScale) / cappedScale;
+        ctx.shadowOffsetY = (3 * sizeScale) / cappedScale;
 
-        // Note body with folded corner
         ctx.beginPath();
         ctx.moveTo(x, y);
         ctx.lineTo(x + noteW - cornerFold, y);
@@ -228,7 +420,6 @@ export default function GraphView({
         ctx.fill();
         ctx.restore();
 
-        // Folded corner triangle
         ctx.beginPath();
         ctx.moveTo(x + noteW - cornerFold, y);
         ctx.lineTo(x + noteW - cornerFold, y + cornerFold);
@@ -237,7 +428,6 @@ export default function GraphView({
         ctx.fillStyle = clusterColor + "44";
         ctx.fill();
 
-        // Border
         ctx.beginPath();
         ctx.moveTo(x, y);
         ctx.lineTo(x + noteW - cornerFold, y);
@@ -249,11 +439,10 @@ export default function GraphView({
         ctx.lineWidth = isSelected ? 2.5 / globalScale : 1 / globalScale;
         ctx.stroke();
 
-        // Selection glow
         if (isSelected) {
           ctx.save();
           ctx.shadowColor = clusterColor;
-          ctx.shadowBlur = 10 / globalScale;
+          ctx.shadowBlur = (10 * sizeScale) / cappedScale;
           ctx.beginPath();
           ctx.moveTo(x, y);
           ctx.lineTo(x + noteW - cornerFold, y);
@@ -262,35 +451,31 @@ export default function GraphView({
           ctx.lineTo(x, y + noteH);
           ctx.closePath();
           ctx.strokeStyle = clusterColor;
-          ctx.lineWidth = 2 / globalScale;
+          ctx.lineWidth = 2 / cappedScale;
           ctx.stroke();
           ctx.restore();
         }
 
-        // Push-pin at top center
         const pinX = node.x!;
-        const pinY = y + 1 / globalScale;
-        const pinR = 3.5 / globalScale;
+        const pinY = y + 1 / cappedScale;
+        const pinR = (3.5 * sizeScale) / cappedScale;
         ctx.beginPath();
         ctx.arc(pinX, pinY, pinR, 0, 2 * Math.PI);
         ctx.fillStyle = "#b45309";
         ctx.fill();
         ctx.strokeStyle = "#92400e";
-        ctx.lineWidth = 0.8 / globalScale;
+        ctx.lineWidth = 0.8 / cappedScale;
         ctx.stroke();
-        // Pin highlight
         ctx.beginPath();
-        ctx.arc(pinX - 1 / globalScale, pinY - 1 / globalScale, 1.2 / globalScale, 0, 2 * Math.PI);
+        ctx.arc(pinX - 1 / cappedScale, pinY - 1 / cappedScale, (1.2 * sizeScale) / cappedScale, 0, 2 * Math.PI);
         ctx.fillStyle = "rgba(255,255,255,0.5)";
         ctx.fill();
 
-        // ── Human silhouette centered on note (behind text) ──
         const silColor = clusterColor + "88";
         const cx = node.x!;
         const cy = node.y!;
-        const s = 1 / globalScale;
+        const s = sizeScale / cappedScale;
 
-        // Head
         const headR = 6.5 * s;
         const headY = cy - 8 * s;
         ctx.beginPath();
@@ -298,7 +483,6 @@ export default function GraphView({
         ctx.fillStyle = silColor;
         ctx.fill();
 
-        // Shoulders / torso — clip to note bounds
         ctx.save();
         ctx.beginPath();
         ctx.rect(x, y, noteW, noteH);
@@ -312,8 +496,7 @@ export default function GraphView({
         ctx.fill();
         ctx.restore();
 
-        // ── Name text on top of silhouette ──
-        const fontSize = 10 / globalScale;
+        const fontSize = (10 * sizeScale) / cappedScale;
         ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -328,21 +511,17 @@ export default function GraphView({
           ctx.fillText(label, cx, cy);
         }
       } else {
-        // ── Default circle node (clusters tab expanded) ──
         const radius = isSelected ? 8 : 5;
         const fontSize = 14 / globalScale;
-
         ctx.beginPath();
         ctx.arc(node.x!, node.y!, radius, 0, 2 * Math.PI);
         ctx.fillStyle = isSelected ? "#ffffff" : clusterColor;
         ctx.fill();
-
         if (isSelected) {
           ctx.strokeStyle = clusterColor;
           ctx.lineWidth = 2;
           ctx.stroke();
         }
-
         ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "top";
@@ -350,7 +529,7 @@ export default function GraphView({
         ctx.fillText(label, node.x!, node.y! + radius + 2);
       }
     },
-    [selectedNode, showClusters]
+    [selectedNodes, showClusters]
   );
 
   const paintLinkLabel = useCallback(
@@ -358,15 +537,10 @@ export default function GraphView({
       const src = link.source as NodeObject;
       const tgt = link.target as NodeObject;
       if (!src.x || !src.y || !tgt.x || !tgt.y) return;
-
-      const emailCount = (link as unknown as GraphLink).count;
-      if (!emailCount) return;
-
+      const emailCount = (link as any).count ?? 1;
       const midX = (src.x + tgt.x) / 2;
       const midY = (src.y + tgt.y) / 2;
       const fontSize = 10 / globalScale;
-
-      // Background pill for readability
       const text = `${emailCount}`;
       ctx.font = `${fontSize}px Inter, system-ui, sans-serif`;
       const tw = ctx.measureText(text).width;
@@ -375,7 +549,6 @@ export default function GraphView({
       ctx.beginPath();
       ctx.roundRect(midX - tw / 2 - pad, midY - fontSize / 2 - pad, tw + pad * 2, fontSize + pad * 2, 3 / globalScale);
       ctx.fill();
-
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillStyle = showClusters ? "#94a3b8" : "#5c3a1e";
@@ -384,317 +557,149 @@ export default function GraphView({
     [showClusters]
   );
 
-  // ── Generate cork texture once as an offscreen canvas ──
   const corkPattern = useMemo(() => {
     if (showClusters) return null;
-
     const size = 512;
     const off = document.createElement("canvas");
-    off.width = size;
-    off.height = size;
+    off.width = size; off.height = size;
     const c = off.getContext("2d")!;
-
-    // Base cork color
     c.fillStyle = "#b5835a";
     c.fillRect(0, 0, size, size);
-
-    // Seeded pseudo-random (deterministic look)
     const rand = (seed: number) => {
       const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
       return x - Math.floor(x);
     };
-
-    // Layer 1 — fine grain noise
     for (let i = 0; i < 18000; i++) {
       const x = rand(i * 1.1) * size;
       const y = rand(i * 2.3 + 7) * size;
       const r = rand(i * 3.7 + 13) * 1.8 + 0.3;
-      const brightness = rand(i * 5.1 + 19);
-      if (brightness < 0.5) {
-        c.fillStyle = `rgba(80, 50, 20, ${0.06 + brightness * 0.08})`;
-      } else {
-        c.fillStyle = `rgba(210, 170, 120, ${0.04 + (brightness - 0.5) * 0.06})`;
-      }
-      c.beginPath();
-      c.arc(x, y, r, 0, Math.PI * 2);
-      c.fill();
+      const b = rand(i * 5.1 + 19);
+      c.fillStyle = b < 0.5 ? `rgba(80, 50, 20, ${0.06 + b * 0.08})` : `rgba(210, 170, 120, ${0.04 + (b - 0.5) * 0.06})`;
+      c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
     }
-
-    // Layer 2 — darker pores / speckles
-    for (let i = 0; i < 3000; i++) {
-      const x = rand(i * 7.3 + 41) * size;
-      const y = rand(i * 11.7 + 59) * size;
-      const r = rand(i * 3.1 + 97) * 2.5 + 0.5;
-      c.fillStyle = `rgba(60, 35, 10, ${0.08 + rand(i * 13.3) * 0.1})`;
-      c.beginPath();
-      c.arc(x, y, r, 0, Math.PI * 2);
-      c.fill();
-    }
-
-    // Layer 3 — subtle lighter streaks (wood fiber)
-    for (let i = 0; i < 200; i++) {
-      const x = rand(i * 17.1 + 3) * size;
-      const y = rand(i * 23.7 + 11) * size;
-      const len = rand(i * 31.3 + 29) * 30 + 10;
-      const angle = rand(i * 37.1 + 43) * Math.PI;
-      c.strokeStyle = `rgba(200, 160, 100, ${0.05 + rand(i * 41.7) * 0.06})`;
-      c.lineWidth = rand(i * 47.3) * 1.5 + 0.5;
-      c.beginPath();
-      c.moveTo(x, y);
-      c.lineTo(x + Math.cos(angle) * len, y + Math.sin(angle) * len);
-      c.stroke();
-    }
-
-    // Layer 4 — very subtle vignette for depth
-    const grad = c.createRadialGradient(size / 2, size / 2, size * 0.2, size / 2, size / 2, size * 0.7);
-    grad.addColorStop(0, "rgba(0,0,0,0)");
-    grad.addColorStop(1, "rgba(0,0,0,0.06)");
-    c.fillStyle = grad;
-    c.fillRect(0, 0, size, size);
-
     return off;
   }, [showClusters]);
 
-  // ── Generate wood frame texture ──
   const woodPattern = useMemo(() => {
     if (showClusters) return null;
-
     const size = 256;
     const off = document.createElement("canvas");
-    off.width = size;
-    off.height = size;
+    off.width = size; off.height = size;
     const c = off.getContext("2d")!;
-
-    // Base dark wood color
     c.fillStyle = "#3e2216";
     c.fillRect(0, 0, size, size);
-
-    const rand = (seed: number) => {
-      const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
-      return x - Math.floor(x);
-    };
-
-    // Horizontal wood grain lines
-    for (let i = 0; i < 600; i++) {
-      const yy = rand(i * 3.1 + 7) * size;
-      const xStart = rand(i * 7.3 + 13) * size * 0.3;
-      const len = rand(i * 11.7 + 19) * size * 0.8 + size * 0.2;
-      const lightness = rand(i * 17.1 + 29);
-      if (lightness < 0.6) {
-        c.strokeStyle = `rgba(80, 45, 20, ${0.15 + lightness * 0.2})`;
-      } else {
-        c.strokeStyle = `rgba(120, 70, 35, ${0.1 + (lightness - 0.6) * 0.15})`;
-      }
-      c.lineWidth = rand(i * 23.7 + 37) * 2 + 0.5;
-      c.beginPath();
-      c.moveTo(xStart, yy);
-      // Slight wave for natural grain
-      const wave = rand(i * 31.3 + 41) * 3;
-      c.quadraticCurveTo(xStart + len / 2, yy + wave, xStart + len, yy - wave * 0.5);
-      c.stroke();
-    }
-
-    // Darker knots
-    for (let i = 0; i < 8; i++) {
-      const kx = rand(i * 53.1 + 71) * size;
-      const ky = rand(i * 67.3 + 83) * size;
-      const kr = rand(i * 79.7 + 97) * 6 + 3;
-      c.beginPath();
-      c.arc(kx, ky, kr, 0, Math.PI * 2);
-      c.fillStyle = `rgba(30, 15, 5, ${0.15 + rand(i * 89.1) * 0.1})`;
-      c.fill();
-    }
-
-    // Fine noise for texture
-    for (let i = 0; i < 4000; i++) {
-      const xx = rand(i * 1.7 + 101) * size;
-      const yy = rand(i * 2.9 + 103) * size;
-      c.fillStyle = `rgba(0, 0, 0, ${0.02 + rand(i * 3.7 + 107) * 0.04})`;
-      c.fillRect(xx, yy, 1.5, 1.5);
-    }
-
     return off;
   }, [showClusters]);
 
-  const FRAME_THICKNESS = 28; // pixels in screen space
-
-  // Paint cork texture as tiled background + wooden frame before each frame
   const onRenderFramePre = useCallback(
-    (ctx: CanvasRenderingContext2D, _globalScale: number) => {
+    (ctx: CanvasRenderingContext2D) => {
       if (showClusters || !corkPattern) return;
-
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-
       const w = ctx.canvas.width;
       const h = ctx.canvas.height;
-      const ft = FRAME_THICKNESS;
-
-      // ── 1. Fill entire canvas with wood pattern (frame will show through) ──
+      const ft = 28;
       if (woodPattern) {
         const wp = ctx.createPattern(woodPattern, "repeat");
-        if (wp) {
-          ctx.fillStyle = wp;
-          ctx.fillRect(0, 0, w, h);
-        }
-      } else {
-        ctx.fillStyle = "#3e2216";
-        ctx.fillRect(0, 0, w, h);
+        if (wp) { ctx.fillStyle = wp; ctx.fillRect(0, 0, w, h); }
       }
-
-      // ── 2. Draw wood frame highlights / bevel ──
-      ctx.strokeStyle = "rgba(160, 110, 60, 0.5)";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(1, 1, w - 2, h - 2);
-
-      ctx.strokeStyle = "rgba(0, 0, 0, 0.4)";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(ft - 1, ft - 1, w - ft * 2 + 2, h - ft * 2 + 2);
-
-      // Bevel – lighter inner edge on top/left
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(ft, ft);
-      ctx.lineTo(ft, h - ft);
-      ctx.lineTo(0, h);
-      ctx.closePath();
-      ctx.fillStyle = "rgba(100, 65, 30, 0.25)";
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(w, 0);
-      ctx.lineTo(w - ft, ft);
-      ctx.lineTo(ft, ft);
-      ctx.closePath();
-      ctx.fillStyle = "rgba(180, 130, 70, 0.2)";
-      ctx.fill();
-
-      // Bevel – darker bottom/right
-      ctx.beginPath();
-      ctx.moveTo(w, h);
-      ctx.lineTo(w - ft, h - ft);
-      ctx.lineTo(w - ft, ft);
-      ctx.lineTo(w, 0);
-      ctx.closePath();
-      ctx.fillStyle = "rgba(0, 0, 0, 0.15)";
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.moveTo(w, h);
-      ctx.lineTo(0, h);
-      ctx.lineTo(ft, h - ft);
-      ctx.lineTo(w - ft, h - ft);
-      ctx.closePath();
-      ctx.fillStyle = "rgba(0, 0, 0, 0.2)";
-      ctx.fill();
-
-      // ── 3. Cork texture inside the frame ──
       ctx.save();
-      ctx.beginPath();
-      ctx.rect(ft, ft, w - ft * 2, h - ft * 2);
-      ctx.clip();
-
+      ctx.beginPath(); ctx.rect(ft, ft, w - ft * 2, h - ft * 2); ctx.clip();
       const pat = ctx.createPattern(corkPattern, "repeat");
-      if (pat) {
-        ctx.fillStyle = pat;
-        ctx.fillRect(0, 0, w, h);
-      }
-
-      // Subtle vignette on cork
-      const frameGrad = ctx.createRadialGradient(
-        w / 2, h / 2, Math.min(w, h) * 0.25,
-        w / 2, h / 2, Math.max(w, h) * 0.7
-      );
-      frameGrad.addColorStop(0, "rgba(0,0,0,0)");
-      frameGrad.addColorStop(1, "rgba(0,0,0,0.12)");
-      ctx.fillStyle = frameGrad;
-      ctx.fillRect(0, 0, w, h);
-
-      ctx.restore(); // end clip
-
-      // ── 4. Inner shadow cast by frame onto cork ──
-      const topSh = ctx.createLinearGradient(0, ft, 0, ft + 12);
-      topSh.addColorStop(0, "rgba(0,0,0,0.3)");
-      topSh.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = topSh;
-      ctx.fillRect(ft, ft, w - ft * 2, 12);
-
-      const leftSh = ctx.createLinearGradient(ft, 0, ft + 12, 0);
-      leftSh.addColorStop(0, "rgba(0,0,0,0.25)");
-      leftSh.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = leftSh;
-      ctx.fillRect(ft, ft, 12, h - ft * 2);
-
-      const botSh = ctx.createLinearGradient(0, h - ft, 0, h - ft - 8);
-      botSh.addColorStop(0, "rgba(0,0,0,0.15)");
-      botSh.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = botSh;
-      ctx.fillRect(ft, h - ft - 8, w - ft * 2, 8);
-
-      const rightSh = ctx.createLinearGradient(w - ft, 0, w - ft - 8, 0);
-      rightSh.addColorStop(0, "rgba(0,0,0,0.15)");
-      rightSh.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = rightSh;
-      ctx.fillRect(w - ft - 8, ft, 8, h - ft * 2);
-
+      if (pat) { ctx.fillStyle = pat; ctx.fillRect(0, 0, w, h); }
+      ctx.restore();
       ctx.restore();
     },
     [showClusters, corkPattern, woodPattern]
   );
 
   return (
-    <ForceGraph2D
-      ref={fgRef}
-      width={width}
-      height={height}
-      graphData={{ nodes, links }}
-      nodeId="id"
-      nodeCanvasObject={paintNode}
-      onRenderFramePre={showClusters ? undefined : onRenderFramePre as any}
-      minZoom={showClusters ? undefined : 0.5}
-      onEngineStop={handleEngineStop}
-      nodePointerAreaPaint={(node, color, ctx) => {
-        const gNode = node as unknown as GraphNode;
-        if (gNode.isClusterNode) {
-          const hitRadius = 14 + (gNode.memberCount ?? 3) * 1.5;
+    <div
+      ref={containerRef}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+      style={{
+        position: "relative",
+        width,
+        height,
+        overflow: "hidden",
+        cursor: boxSelectEnabled ? "crosshair" : "grab",
+        opacity: isReady ? 1 : 0,
+        transition: "opacity 0.6s ease-in-out"
+      }}
+    >
+      <ForceGraph2D
+        ref={fgRef}
+        width={width}
+        height={height}
+        warmupTicks={200}
+        cooldownTicks={0}
+        graphData={graphData}
+        nodeId="id"
+        nodeCanvasObject={paintNode}
+        onRenderFramePre={showClusters ? undefined : (onRenderFramePre as any)}
+        onEngineStop={handleEngineStop}
+        onNodeClick={handleClick as any}
+        onLinkClick={handleLinkClick}
+        onBackgroundClick={onBackgroundClick}
+        onNodeDrag={handleNodeDrag}
+        onNodeDragEnd={handleNodeDragEnd}
+        linkCanvasObject={paintLinkLabel}
+        linkCanvasObjectMode={() => "after"}
+        enablePointerInteraction={true}
+        enablePanInteraction={!boxSelectEnabled}
+        nodePointerAreaPaint={(node, color, ctx) => {
+          const gNode = node as unknown as GraphNode;
+          if (gNode.isClusterNode) {
+            const hitRadius = 14 + (gNode.memberCount ?? 3) * 1.5;
+            ctx.beginPath(); ctx.arc(node.x!, node.y!, hitRadius, 0, 2 * Math.PI);
+            ctx.fillStyle = color; ctx.fill();
+          } else if (!showClusters) {
+            const sizeScale = 0.8 + 1.2 * Math.pow((gNode.degree ?? 0) / maxDegree, 0.5);
+            const s = 35 * sizeScale;
+            ctx.fillStyle = color; ctx.fillRect(node.x! - s, node.y! - s, s * 2, s * 2);
+          } else {
+            ctx.beginPath(); ctx.arc(node.x!, node.y!, 8, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.stroke();
+          }
+        }}
+        linkColor={() => (showClusters ? "#475569" : "#8B4513")}
+        linkPointerAreaPaint={(link, color, ctx, globalScale) => {
+          const src = link.source as NodeObject;
+          const tgt = link.target as NodeObject;
+          if (!src.x || !src.y || !tgt.x || !tgt.y) return;
+
+          // Draw a thick line for the connection to make it easier to click
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 14 / globalScale; // Thicker hit area, scaled so it stays useful
           ctx.beginPath();
-          ctx.arc(node.x!, node.y!, hitRadius, 0, 2 * Math.PI);
+          ctx.moveTo(src.x, src.y);
+          ctx.lineTo(tgt.x, tgt.y);
+          ctx.stroke();
+
+          // Draw a blob in the middle to cover the exact label area
+          const midX = (src.x + tgt.x) / 2;
+          const midY = (src.y + tgt.y) / 2;
           ctx.fillStyle = color;
-          ctx.fill();
-        } else if (!showClusters) {
-          // Sticky note hit area
-          const s = 35;
-          ctx.fillStyle = color;
-          ctx.fillRect(node.x! - s, node.y! - s, s * 2, s * 2);
-        } else {
           ctx.beginPath();
-          ctx.arc(node.x!, node.y!, 8, 0, 2 * Math.PI);
-          ctx.fillStyle = color;
+          ctx.arc(midX, midY, 16 / globalScale, 0, 2 * Math.PI);
           ctx.fill();
-        }
-      }}
-      linkColor={() => showClusters ? "#475569" : "#8B4513"}
-      linkWidth={(link) => {
-        const count = (link as unknown as GraphLink).count ?? 1;
-        return Math.min(1 + Math.log2(count), 6);
-      }}
-      linkCanvasObjectMode={() => "after"}
-      linkCanvasObject={paintLinkLabel}
-      onNodeClick={handleClick}
-      onLinkClick={handleLinkClick}
-      linkPointerAreaPaint={(link, color, ctx) => {
-        const src = link.source as NodeObject;
-        const tgt = link.target as NodeObject;
-        if (!src.x || !src.y || !tgt.x || !tgt.y) return;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 8;
-        ctx.beginPath();
-        ctx.moveTo(src.x, src.y);
-        ctx.lineTo(tgt.x, tgt.y);
-        ctx.stroke();
-      }}
-      backgroundColor={showClusters ? "#0f172a" : "#a0764e"}
-    />
+        }}
+        linkWidth={(link) => {
+          const count = (link as unknown as GraphLink).count ?? 1;
+          return Math.sqrt(count) * (showClusters ? 2.0 : 1.4);
+        }}
+        linkCurvature={0.03}
+      />
+      {selectionBox && (
+        <div style={{
+          position: "absolute", zIndex: 100, border: "2px solid #6366f1", backgroundColor: "rgba(99, 102, 241, 0.2)",
+          left: Math.min(selectionBox.x1, selectionBox.x2), top: Math.min(selectionBox.y1, selectionBox.y2),
+          width: Math.abs(selectionBox.x2 - selectionBox.x1), height: Math.abs(selectionBox.y2 - selectionBox.y1),
+          pointerEvents: "none"
+        }} />
+      )}
+    </div>
   );
 }

@@ -5,6 +5,7 @@ export interface Person {
   name: string;
   cluster?: number;
   cluster_name?: string;
+  degree?: number;
 }
 
 export interface Edge {
@@ -53,5 +54,18 @@ export async function fetchSubgraph(email: string, depth = 1): Promise<GraphData
 
 export async function fetchMeta(): Promise<MetaData> {
   const res = await fetch(`${API_BASE}/meta`);
+  return res.json();
+}
+
+export async function summarizeEdge(source: string, target: string): Promise<{ summary: string }> {
+  const res = await fetch(`${API_BASE}/graph/summarize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source, target }),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Summarization failed");
+  }
   return res.json();
 }
