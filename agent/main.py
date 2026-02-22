@@ -4,10 +4,19 @@ AI Agent CLI.
 Usage:
     python main.py ingest          Run agent on a sample email chain.
     python main.py ingest-fake     Run agent on all fake test chains.
-    python main.py summarize       Generate summaries for all annotated edges.
+    python main.py ingest-csv [path]  Run agent on each email chain in a CSV (default: epstein_email.csv).
+    python main.py summarize [--force] [--workers N]
+                                Generate summaries for annotated edges (skips already-summarized by default).
+                                --force  re-summarize even if summary exists.
+                                --workers N  max concurrent LLM calls (default 8).
 """
 
+import argparse
+import csv
 import sys
+from pathlib import Path
+
+from tqdm import tqdm
 
 from agent import run_agent, run_agent_from_chain_text, summarize_edges
 from fake_data import FAKE_CHAINS
@@ -81,8 +90,39 @@ def main():
             summary = run_agent_from_chain_text(chain_text)
             print(f"Summary: {summary}")
         print("\nDone. Run 'python main.py summarize' to generate edge summaries.")
+    elif command == "ingest-csv":
+        csv_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(__file__).parent / "epstein_email.csv"
+        if not csv_path.exists():
+            print(f"CSV not found: {csv_path}")
+            sys.exit(1)
+        # Allow very large email body fields (default limit is 128KB)
+        csv.field_size_limit(min(2**31 - 1, sys.maxsize))
+        chain_column = "email_text_clean"
+        with open(csv_path, newline="", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            if chain_column not in reader.fieldnames:
+                chain_column = "email_text"
+            if chain_column not in reader.fieldnames:
+                print(f"CSV must have column 'email_text_clean' or 'email_text'. Found: {reader.fieldnames}")
+                sys.exit(1)
+            rows = list(reader)
+        total = len(rows)
+        print(f"Running agent on {total} rows from {csv_path.name} (column: {chain_column})")
+        for row in tqdm(rows, desc="Chains", unit="chain"):
+            chain_text = (row.get(chain_column) or "").strip()
+            if not chain_text:
+                continue
+            try:
+                run_agent_from_chain_text(chain_text)
+            except Exception as e:
+                tqdm.write(f"Error on row: {e}")
+        print("\nDone. Run 'python main.py summarize' to generate edge summaries.")
     elif command == "summarize":
-        summarize_edges()
+        parser = argparse.ArgumentParser(prog="main.py summarize")
+        parser.add_argument("--force", action="store_true", help="Re-summarize edges that already have a summary")
+        parser.add_argument("--workers", type=int, default=8, metavar="N", help="Max concurrent LLM calls (default 8)")
+        args = parser.parse_args(sys.argv[2:])
+        summarize_edges(skip_existing=not args.force, max_workers=args.workers)
     else:
         print(f"Unknown command: {command}")
         print(__doc__.strip())
