@@ -129,12 +129,19 @@ def run_agent(email_addresses: list[str], email_chain: str) -> str:
 
     Returns a text summary of what was ingested.
     """
+    import os
+    aliases = {}
+    if os.path.exists("agent/aliases.json"):
+        with open("agent/aliases.json", "r") as f:
+            aliases = json.load(f)
+
     driver = get_driver()
     ensure_constraints(driver)
 
     with driver.session() as session:
         for email in email_addresses:
-            session.execute_write(upsert_person, email)
+            name = aliases.get(email, email) # Fallback to email if no alias
+            session.execute_write(upsert_person, email, name=name)
 
     address_list = "\n".join(f"- {addr}" for addr in email_addresses)
     user_message = (

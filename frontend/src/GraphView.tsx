@@ -130,10 +130,21 @@ export default function GraphView({
 
     if (hasClusterNodes) {
       fg.d3Force("charge")?.strength(-300).distanceMax(550);
-      fg.d3Force("link")?.distance(280).strength(0.5);
+      fg.d3Force("link")?.distance((link: any) => {
+        const count = link.count ?? 1;
+        // Base distance 280, minus up to 180 depending on volume
+        return Math.max(100, 280 - Math.sqrt(count) * 20);
+      }).strength(0.5);
     } else {
       fg.d3Force("charge")?.strength(-650).distanceMax(700);
-      fg.d3Force("link")?.distance(320).strength(0.3);
+      fg.d3Force("link")?.distance((link: any) => {
+        const count = link.count ?? 1;
+        // Base distance 320, reduced noticeably for strong connections
+        // A count of 1 -> 310
+        // A count of 25 -> 270
+        // A count of 100 -> 220
+        return Math.max(120, 320 - Math.sqrt(count) * 10);
+      }).strength(0.3);
 
       fg.d3Force("center", () => {
         for (const node of nodes as (GraphNode & { x?: number; y?: number; vx?: number; vy?: number })[]) {

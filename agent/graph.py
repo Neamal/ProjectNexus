@@ -22,8 +22,16 @@ def ensure_constraints(driver):
         )
 
 
-def upsert_person(tx, email: str):
-    tx.run("MERGE (p:Person {email: $email})", email=email)
+def upsert_person(tx, email: str, name: str = None):
+    if name:
+        tx.run(
+            "MERGE (p:Person {email: $email}) "
+            "ON CREATE SET p.name = $name "
+            "ON MATCH SET p.name = $name",
+            email=email, name=name
+        )
+    else:
+        tx.run("MERGE (p:Person {email: $email})", email=email)
 
 
 def append_comment(tx, email_a: str, email_b: str, comment: str):
