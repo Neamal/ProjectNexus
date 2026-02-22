@@ -121,6 +121,7 @@ def main():
                 tqdm.write(f"Error on row: {e}")
         print("\nDone. Run 'python main.py summarize' to generate edge summaries.")
     elif command == "summarize":
+        print('summarizing edges')
         parser = argparse.ArgumentParser(prog="main.py summarize")
         parser.add_argument("--force", action="store_true", help="Re-summarize edges that already have a summary")
         parser.add_argument("--workers", type=int, default=8, metavar="N", help="Max concurrent LLM calls (default 8)")

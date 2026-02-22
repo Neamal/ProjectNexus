@@ -610,7 +610,16 @@ export default function App() {
                                     if (isExpanded) {
                                       setSelectedEdge(null);
                                     } else {
-                                      handleLinkClick(lastSelected!, n.email);
+                                      // Find and show the edge details without changing node selection
+                                      const edge = graphData?.edges.find(
+                                        (e) =>
+                                          (e.source === lastSelected && e.target === n.email) ||
+                                          (e.source === n.email && e.target === lastSelected)
+                                      );
+                                      if (edge) {
+                                        setSelectedEdge(edge);
+                                        setShowComments(false);
+                                      }
                                     }
                                   }}
                                   style={{
