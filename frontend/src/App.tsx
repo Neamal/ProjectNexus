@@ -443,7 +443,7 @@ export default function App() {
   return (
     <div style={{ display: "flex", height: "100vh", background: "#0f172a", color: "#e2e8f0", fontFamily: "Inter, system-ui, sans-serif" }}>
       {/* Sidebar */}
-      <aside style={{ width: 280, padding: 20, borderRight: "1px solid #1e293b", overflowY: "auto", flexShrink: 0 }}>
+      <aside style={{ width: 320, padding: 20, borderRight: "1px solid #1e293b", overflowY: "auto", flexShrink: 0 }}>
         <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>ProjectNexus</h1>
 
         {meta && (
@@ -697,6 +697,33 @@ export default function App() {
                 )}
               </>
             )}
+          </div>
+        )}
+
+        {/* Multi-select actions (shown when 2+ nodes are selected) */}
+        {selectedNodes.size > 1 && (
+          <div style={{ marginBottom: 16 }}>
+            <p style={{ fontSize: 13, color: "#94a3b8" }}>{selectedNodes.size} nodes selected</p>
+            <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+              <button
+                onClick={handleHideSelected}
+                style={{ padding: "4px 8px", fontSize: 11, background: "#475569", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}
+              >
+                Hide selected
+              </button>
+              <button
+                onClick={handleShowSelected}
+                style={{ padding: "4px 8px", fontSize: 11, background: "#475569", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}
+              >
+                Show selected
+              </button>
+              <button
+                onClick={handleShowOnly}
+                style={{ padding: "4px 8px", fontSize: 11, background: "#475569", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}
+              >
+                Show only
+              </button>
+            </div>
           </div>
         )}
 
