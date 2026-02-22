@@ -31,7 +31,8 @@ def fetch_graph_data(driver):
     """Pull all nodes and edges from Neo4j."""
     with driver.session() as session:
         nodes = session.run(
-            "MATCH (p:Person) RETURN p.email AS email, p.name AS name"
+            "MATCH (p:Person) WHERE (p)-[:COMMUNICATES_WITH]-() "
+            "RETURN DISTINCT p.email AS email, p.name AS name"
         ).data()
 
         edges = session.run(
@@ -161,7 +162,8 @@ def ensure_clustered(driver, force=False):
     with _cluster_lock:
         with driver.session() as session:
             r = session.run(
-                "MATCH (p:Person) WITH count(p) AS total, count(p.cluster) AS with_cluster RETURN total, with_cluster"
+                "MATCH (p:Person) WHERE (p)-[:COMMUNICATES_WITH]-() "
+                "WITH count(p) AS total, count(p.cluster) AS with_cluster RETURN total, with_cluster"
             ).single()
             if not r or r["total"] == 0:
                 return

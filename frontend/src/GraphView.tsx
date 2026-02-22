@@ -11,6 +11,7 @@ interface GraphNode {
   cluster?: number;
   isClusterNode?: boolean;
   memberCount?: number;
+  degree?: number;
 }
 
 interface GraphLink {
@@ -91,6 +92,11 @@ export default function GraphView({
     return { half: baseHalf };
   }, [nodes.length, showClusters]);
 
+  const maxDegree = useMemo(() => {
+    if (nodes.length === 0) return 1;
+    return Math.max(1, ...nodes.map(n => n.degree ?? 0));
+  }, [nodes]);
+
   const settled = useRef(false);
   const userInteracted = useRef(false);
   const lastResetSignal = useRef<number | undefined>(resetLayoutSignal);
@@ -131,22 +137,25 @@ export default function GraphView({
     if (!fg) return;
 
     if (hasClusterNodes) {
-      fg.d3Force("charge")?.strength(-300).distanceMax(550);
+      fg.d3Force("charge")?.strength(-450).distanceMax(700);
       fg.d3Force("link")?.distance((link: any) => {
         const count = link.count ?? 1;
-        // Base distance 280, minus up to 180 depending on volume
-        return Math.max(100, 280 - Math.sqrt(count) * 20);
-      }).strength(0.5);
+        return Math.max(40, 500 - Math.sqrt(count) * 90);
+      }).strength((link: any) => {
+        const count = link.count ?? 1;
+        // Stronger connections pull harder to contract (up to 0.4)
+        return 0.1 + Math.min(0.3, Math.sqrt(count) / 10);
+      });
     } else {
-      fg.d3Force("charge")?.strength(-650).distanceMax(700);
+      fg.d3Force("charge")?.strength(-1100).distanceMax(1100);
       fg.d3Force("link")?.distance((link: any) => {
         const count = link.count ?? 1;
-        // Base distance 320, reduced noticeably for strong connections
-        // A count of 1 -> 310
-        // A count of 25 -> 270
-        // A count of 100 -> 220
-        return Math.max(120, 320 - Math.sqrt(count) * 10);
-      }).strength(0.3);
+        return Math.max(70, 680 - Math.sqrt(count) * 130);
+      }).strength((link: any) => {
+        const count = link.count ?? 1;
+        // Strong hubs contract more firmly (up to 0.35)
+        return 0.06 + Math.min(0.29, Math.sqrt(count) / 15);
+      });
 
       fg.d3Force("center", () => {
         for (const node of nodes as (GraphNode & { x?: number; y?: number; vx?: number; vy?: number })[]) {
@@ -383,18 +392,22 @@ export default function GraphView({
         ctx.fillStyle = clusterColor;
         ctx.fillText(label, node.x!, node.y!);
       } else if (!showClusters) {
-        const noteW = 64 / globalScale;
-        const noteH = 52 / globalScale;
+        // cappedScale stops things from staying "fixed screen-size" forever
+        // Once zoom exceeds 1.0x, the icons and font start growing with the zoom
+        const cappedScale = Math.min(globalScale, 1.0);
+        const sizeScale = 0.8 + 1.2 * Math.pow((gNode.degree ?? 0) / maxDegree, 0.5);
+        const noteW = (64 * sizeScale) / cappedScale;
+        const noteH = (52 * sizeScale) / cappedScale;
         const x = node.x! - noteW / 2;
         const y = node.y! - noteH / 2;
         const noteFill = NOTE_FILLS[ci];
-        const cornerFold = 8 / globalScale;
+        const cornerFold = (8 * sizeScale) / cappedScale;
 
         ctx.save();
         ctx.shadowColor = "rgba(0,0,0,0.35)";
-        ctx.shadowBlur = 6 / globalScale;
-        ctx.shadowOffsetX = 2 / globalScale;
-        ctx.shadowOffsetY = 3 / globalScale;
+        ctx.shadowBlur = (6 * sizeScale) / cappedScale;
+        ctx.shadowOffsetX = (2 * sizeScale) / cappedScale;
+        ctx.shadowOffsetY = (3 * sizeScale) / cappedScale;
 
         ctx.beginPath();
         ctx.moveTo(x, y);
@@ -429,7 +442,7 @@ export default function GraphView({
         if (isSelected) {
           ctx.save();
           ctx.shadowColor = clusterColor;
-          ctx.shadowBlur = 10 / globalScale;
+          ctx.shadowBlur = (10 * sizeScale) / cappedScale;
           ctx.beginPath();
           ctx.moveTo(x, y);
           ctx.lineTo(x + noteW - cornerFold, y);
@@ -438,30 +451,30 @@ export default function GraphView({
           ctx.lineTo(x, y + noteH);
           ctx.closePath();
           ctx.strokeStyle = clusterColor;
-          ctx.lineWidth = 2 / globalScale;
+          ctx.lineWidth = 2 / cappedScale;
           ctx.stroke();
           ctx.restore();
         }
 
         const pinX = node.x!;
-        const pinY = y + 1 / globalScale;
-        const pinR = 3.5 / globalScale;
+        const pinY = y + 1 / cappedScale;
+        const pinR = (3.5 * sizeScale) / cappedScale;
         ctx.beginPath();
         ctx.arc(pinX, pinY, pinR, 0, 2 * Math.PI);
         ctx.fillStyle = "#b45309";
         ctx.fill();
         ctx.strokeStyle = "#92400e";
-        ctx.lineWidth = 0.8 / globalScale;
+        ctx.lineWidth = 0.8 / cappedScale;
         ctx.stroke();
         ctx.beginPath();
-        ctx.arc(pinX - 1 / globalScale, pinY - 1 / globalScale, 1.2 / globalScale, 0, 2 * Math.PI);
+        ctx.arc(pinX - 1 / cappedScale, pinY - 1 / cappedScale, (1.2 * sizeScale) / cappedScale, 0, 2 * Math.PI);
         ctx.fillStyle = "rgba(255,255,255,0.5)";
         ctx.fill();
 
         const silColor = clusterColor + "88";
         const cx = node.x!;
         const cy = node.y!;
-        const s = 1 / globalScale;
+        const s = sizeScale / cappedScale;
 
         const headR = 6.5 * s;
         const headY = cy - 8 * s;
@@ -483,7 +496,7 @@ export default function GraphView({
         ctx.fill();
         ctx.restore();
 
-        const fontSize = 10 / globalScale;
+        const fontSize = (10 * sizeScale) / cappedScale;
         ctx.font = `700 ${fontSize}px Inter, system-ui, sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -612,7 +625,7 @@ export default function GraphView({
         width,
         height,
         overflow: "hidden",
-        cursor: "default",
+        cursor: boxSelectEnabled ? "crosshair" : "grab",
         opacity: isReady ? 1 : 0,
         transition: "opacity 0.6s ease-in-out"
       }}
@@ -636,7 +649,7 @@ export default function GraphView({
         linkCanvasObject={paintLinkLabel}
         linkCanvasObjectMode={() => "after"}
         enablePointerInteraction={true}
-        enablePanInteraction={false}
+        enablePanInteraction={!boxSelectEnabled}
         nodePointerAreaPaint={(node, color, ctx) => {
           const gNode = node as unknown as GraphNode;
           if (gNode.isClusterNode) {
@@ -644,7 +657,9 @@ export default function GraphView({
             ctx.beginPath(); ctx.arc(node.x!, node.y!, hitRadius, 0, 2 * Math.PI);
             ctx.fillStyle = color; ctx.fill();
           } else if (!showClusters) {
-            const s = 35; ctx.fillStyle = color; ctx.fillRect(node.x! - s, node.y! - s, s * 2, s * 2);
+            const sizeScale = 0.8 + 1.2 * Math.pow((gNode.degree ?? 0) / maxDegree, 0.5);
+            const s = 35 * sizeScale;
+            ctx.fillStyle = color; ctx.fillRect(node.x! - s, node.y! - s, s * 2, s * 2);
           } else {
             ctx.beginPath(); ctx.arc(node.x!, node.y!, 8, 0, 2 * Math.PI); ctx.fillStyle = color; ctx.stroke();
           }

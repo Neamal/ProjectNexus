@@ -17,3 +17,10 @@ def read_query(cypher: str, params: dict | None = None):
     with driver.session() as session:
         result = session.run(cypher, params or {})
         return [record.data() for record in result]
+ 
+ 
+def write_query(cypher: str, params: dict | None = None):
+    """Execute a write Cypher query."""
+    driver = get_driver()
+    with driver.session() as session:
+        session.run(cypher, params or {})
