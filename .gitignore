@@ -5,9 +5,10 @@ node_modules/
 dist/
 .vite/
 neo4j_data/
-
+.DS_Store
 *.csv
 *.parquet
+*.zip
 .venv/
 venv/
 

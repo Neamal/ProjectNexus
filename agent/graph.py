@@ -34,6 +34,20 @@ def upsert_person(tx, email: str, name: str = None):
         tx.run("MERGE (p:Person {email: $email})", email=email)
 
 
+def upsert_persons(tx, email_names: dict[str, str]) -> None:
+    """Upsert all given emails as Person nodes in one transaction, adding names if provided."""
+    for email, name in email_names.items():
+        if name:
+            tx.run(
+                "MERGE (p:Person {email: $email}) "
+                "ON CREATE SET p.name = $name "
+                "ON MATCH SET p.name = $name",
+                email=email, name=name
+            )
+        else:
+            tx.run("MERGE (p:Person {email: $email})", email=email)
+
+
 def append_comment(tx, email_a: str, email_b: str, comment: str):
     """Normalize pair order, MERGE edge, append comment to list."""
     lo, hi = normalize_pair(email_a, email_b)
@@ -93,6 +107,17 @@ def increment_email_count(tx, email_a: str, email_b: str):
     )
 
 
+def increment_email_count_batch(tx, pairs: list[tuple[str, str]]) -> None:
+    """Bump email_count by 1 for each pair in one transaction."""
+    for email_a, email_b in pairs:
+        lo, hi = normalize_pair(email_a, email_b)
+        tx.run(
+            "MATCH (a:Person {email: $lo})-[r:COMMUNICATES_WITH]-(b:Person {email: $hi}) "
+            "SET r.email_count = coalesce(r.email_count, 0) + 1",
+            lo=lo, hi=hi,
+        )
+
+
 def get_comments(tx, email_a: str, email_b: str) -> list[str]:
     lo, hi = normalize_pair(email_a, email_b)
     result = tx.run(
@@ -111,6 +136,17 @@ def set_summary(tx, email_a: str, email_b: str, summary: str):
         "SET r.summary = $summary",
         lo=lo, hi=hi, summary=summary,
     )
+
+
+def set_summary_batch(tx, updates: list[tuple[str, str, str]]) -> None:
+    """Set summary for multiple edges in one transaction. Each item is (email_a, email_b, summary)."""
+    for email_a, email_b, summary in updates:
+        lo, hi = normalize_pair(email_a, email_b)
+        tx.run(
+            "MATCH (a:Person {email: $lo})-[r:COMMUNICATES_WITH]-(b:Person {email: $hi}) "
+            "SET r.summary = $summary",
+            lo=lo, hi=hi, summary=summary,
+        )
 
 
 def get_all_edges(tx) -> list[dict]:
