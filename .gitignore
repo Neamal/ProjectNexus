@@ -5,10 +5,7 @@ node_modules/
 dist/
 .vite/
 neo4j_data/
-<<<<<<< HEAD
 
 *.csv
 *.parquet
-=======
 .venv/
->>>>>>> db0feb1897393ce748e2dc7422e4f90bb7115a3f
