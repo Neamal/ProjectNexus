@@ -72,32 +72,84 @@ export default function GraphView({
 
   const hasClusterNodes = nodes.some((n) => n.isClusterNode);
 
+  // ── Compute board extent based on node count & spread ──
+  const boardExtent = useMemo(() => {
+    if (showClusters) return null;
+    const n = nodes.length;
+    // Each sticky note is ~64 world-units wide; allow generous spacing
+    // Base size grows with sqrt of node count for reasonable density
+    const baseHalf = Math.max(200, 80 * Math.sqrt(n));
+    return { half: baseHalf };
+  }, [nodes.length, showClusters]);
+
   useEffect(() => {
     const fg = fgRef.current;
     if (!fg) return;
 
     if (hasClusterNodes) {
       fg.d3Force("charge")?.strength(-400);
-      // More emails between clusters → shorter distance
       fg.d3Force("link")
         ?.distance((link: any) => {
           const count = link.count ?? 1;
-          // Invert: high count → short distance, low count → long distance
-          // Range roughly 100–300
           return Math.max(100, 300 - count * 1.5);
         });
+      // Remove bounding force in cluster mode
+      fg.d3Force("bound", null);
     } else {
-      // Sticky-note nodes need more space
       fg.d3Force("charge")?.strength(-250);
       fg.d3Force("link")
         ?.distance((link: any) => {
           const count = link.count ?? 1;
           return Math.max(60, 200 - count * 0.8);
         });
+
+      // ── Bounding force: keep nodes inside the cork area ──
+      if (boardExtent) {
+        const bHalf = boardExtent.half;
+        const pad = 40; // margin from edge
+        const limit = bHalf - pad;
+        fg.d3Force("bound", () => {
+          for (const node of nodes as (GraphNode & { x?: number; y?: number; vx?: number; vy?: number })[]) {
+            if (node.isClusterNode) continue;
+            if (node.x != null && node.x > limit) { node.vx = (node.vx ?? 0) - 0.5; }
+            if (node.x != null && node.x < -limit) { node.vx = (node.vx ?? 0) + 0.5; }
+            if (node.y != null && node.y > limit) { node.vy = (node.vy ?? 0) - 0.5; }
+            if (node.y != null && node.y < -limit) { node.vy = (node.vy ?? 0) + 0.5; }
+          }
+        });
+      }
     }
 
     fg.d3ReheatSimulation();
-  }, [hasClusterNodes]);
+  }, [hasClusterNodes, boardExtent, nodes]);
+
+  // ── After engine stops, freeze all node positions & fit view ──
+  const settled = useRef(false);
+  useEffect(() => {
+    settled.current = false;
+    // Unpin nodes so new layout can run
+    for (const node of nodes as (GraphNode & { fx?: number; fy?: number })[]) {
+      node.fx = undefined;
+      node.fy = undefined;
+    }
+  }, [nodes.length, showClusters]);
+
+  const handleEngineStop = useCallback(() => {
+    if (settled.current) return;
+    settled.current = true;
+    const fg = fgRef.current;
+    if (!fg) return;
+
+    // Pin every node so they never move again on zoom / pan
+    for (const node of nodes as (GraphNode & { x?: number; y?: number; fx?: number; fy?: number })[]) {
+      if (node.x != null) node.fx = node.x;
+      if (node.y != null) node.fy = node.y;
+    }
+
+    if (!showClusters) {
+      fg.zoomToFit(400, 60);
+    }
+  }, [nodes, showClusters]);
 
   const handleClick = useCallback(
     (node: NodeObject) => {
@@ -403,31 +455,192 @@ export default function GraphView({
     return off;
   }, [showClusters]);
 
-  // Paint cork texture as tiled background before each frame
+  // ── Generate wood frame texture ──
+  const woodPattern = useMemo(() => {
+    if (showClusters) return null;
+
+    const size = 256;
+    const off = document.createElement("canvas");
+    off.width = size;
+    off.height = size;
+    const c = off.getContext("2d")!;
+
+    // Base dark wood color
+    c.fillStyle = "#3e2216";
+    c.fillRect(0, 0, size, size);
+
+    const rand = (seed: number) => {
+      const x = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
+      return x - Math.floor(x);
+    };
+
+    // Horizontal wood grain lines
+    for (let i = 0; i < 600; i++) {
+      const yy = rand(i * 3.1 + 7) * size;
+      const xStart = rand(i * 7.3 + 13) * size * 0.3;
+      const len = rand(i * 11.7 + 19) * size * 0.8 + size * 0.2;
+      const lightness = rand(i * 17.1 + 29);
+      if (lightness < 0.6) {
+        c.strokeStyle = `rgba(80, 45, 20, ${0.15 + lightness * 0.2})`;
+      } else {
+        c.strokeStyle = `rgba(120, 70, 35, ${0.1 + (lightness - 0.6) * 0.15})`;
+      }
+      c.lineWidth = rand(i * 23.7 + 37) * 2 + 0.5;
+      c.beginPath();
+      c.moveTo(xStart, yy);
+      // Slight wave for natural grain
+      const wave = rand(i * 31.3 + 41) * 3;
+      c.quadraticCurveTo(xStart + len / 2, yy + wave, xStart + len, yy - wave * 0.5);
+      c.stroke();
+    }
+
+    // Darker knots
+    for (let i = 0; i < 8; i++) {
+      const kx = rand(i * 53.1 + 71) * size;
+      const ky = rand(i * 67.3 + 83) * size;
+      const kr = rand(i * 79.7 + 97) * 6 + 3;
+      c.beginPath();
+      c.arc(kx, ky, kr, 0, Math.PI * 2);
+      c.fillStyle = `rgba(30, 15, 5, ${0.15 + rand(i * 89.1) * 0.1})`;
+      c.fill();
+    }
+
+    // Fine noise for texture
+    for (let i = 0; i < 4000; i++) {
+      const xx = rand(i * 1.7 + 101) * size;
+      const yy = rand(i * 2.9 + 103) * size;
+      c.fillStyle = `rgba(0, 0, 0, ${0.02 + rand(i * 3.7 + 107) * 0.04})`;
+      c.fillRect(xx, yy, 1.5, 1.5);
+    }
+
+    return off;
+  }, [showClusters]);
+
+  const FRAME_THICKNESS = 28; // pixels in screen space
+
+  // Paint cork texture as tiled background + wooden frame before each frame
   const onRenderFramePre = useCallback(
     (ctx: CanvasRenderingContext2D, _globalScale: number) => {
       if (showClusters || !corkPattern) return;
 
       ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+      const w = ctx.canvas.width;
+      const h = ctx.canvas.height;
+      const ft = FRAME_THICKNESS;
+
+      // ── 1. Fill entire canvas with wood pattern (frame will show through) ──
+      if (woodPattern) {
+        const wp = ctx.createPattern(woodPattern, "repeat");
+        if (wp) {
+          ctx.fillStyle = wp;
+          ctx.fillRect(0, 0, w, h);
+        }
+      } else {
+        ctx.fillStyle = "#3e2216";
+        ctx.fillRect(0, 0, w, h);
+      }
+
+      // ── 2. Draw wood frame highlights / bevel ──
+      ctx.strokeStyle = "rgba(160, 110, 60, 0.5)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(1, 1, w - 2, h - 2);
+
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.4)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(ft - 1, ft - 1, w - ft * 2 + 2, h - ft * 2 + 2);
+
+      // Bevel – lighter inner edge on top/left
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(ft, ft);
+      ctx.lineTo(ft, h - ft);
+      ctx.lineTo(0, h);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(100, 65, 30, 0.25)";
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(w, 0);
+      ctx.lineTo(w - ft, ft);
+      ctx.lineTo(ft, ft);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(180, 130, 70, 0.2)";
+      ctx.fill();
+
+      // Bevel – darker bottom/right
+      ctx.beginPath();
+      ctx.moveTo(w, h);
+      ctx.lineTo(w - ft, h - ft);
+      ctx.lineTo(w - ft, ft);
+      ctx.lineTo(w, 0);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.15)";
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(w, h);
+      ctx.lineTo(0, h);
+      ctx.lineTo(ft, h - ft);
+      ctx.lineTo(w - ft, h - ft);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.2)";
+      ctx.fill();
+
+      // ── 3. Cork texture inside the frame ──
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(ft, ft, w - ft * 2, h - ft * 2);
+      ctx.clip();
+
       const pat = ctx.createPattern(corkPattern, "repeat");
       if (pat) {
         ctx.fillStyle = pat;
-        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        ctx.fillRect(0, 0, w, h);
       }
 
-      // Subtle darkened border/frame
-      const w = ctx.canvas.width;
-      const h = ctx.canvas.height;
-      const frameGrad = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.3, w / 2, h / 2, Math.max(w, h) * 0.8);
+      // Subtle vignette on cork
+      const frameGrad = ctx.createRadialGradient(
+        w / 2, h / 2, Math.min(w, h) * 0.25,
+        w / 2, h / 2, Math.max(w, h) * 0.7
+      );
       frameGrad.addColorStop(0, "rgba(0,0,0,0)");
-      frameGrad.addColorStop(1, "rgba(0,0,0,0.15)");
+      frameGrad.addColorStop(1, "rgba(0,0,0,0.12)");
       ctx.fillStyle = frameGrad;
       ctx.fillRect(0, 0, w, h);
 
+      ctx.restore(); // end clip
+
+      // ── 4. Inner shadow cast by frame onto cork ──
+      const topSh = ctx.createLinearGradient(0, ft, 0, ft + 12);
+      topSh.addColorStop(0, "rgba(0,0,0,0.3)");
+      topSh.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = topSh;
+      ctx.fillRect(ft, ft, w - ft * 2, 12);
+
+      const leftSh = ctx.createLinearGradient(ft, 0, ft + 12, 0);
+      leftSh.addColorStop(0, "rgba(0,0,0,0.25)");
+      leftSh.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = leftSh;
+      ctx.fillRect(ft, ft, 12, h - ft * 2);
+
+      const botSh = ctx.createLinearGradient(0, h - ft, 0, h - ft - 8);
+      botSh.addColorStop(0, "rgba(0,0,0,0.15)");
+      botSh.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = botSh;
+      ctx.fillRect(ft, h - ft - 8, w - ft * 2, 8);
+
+      const rightSh = ctx.createLinearGradient(w - ft, 0, w - ft - 8, 0);
+      rightSh.addColorStop(0, "rgba(0,0,0,0.15)");
+      rightSh.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = rightSh;
+      ctx.fillRect(w - ft - 8, ft, 8, h - ft * 2);
+
       ctx.restore();
     },
-    [showClusters, corkPattern]
+    [showClusters, corkPattern, woodPattern]
   );
 
   return (
@@ -439,6 +652,8 @@ export default function GraphView({
       nodeId="id"
       nodeCanvasObject={paintNode}
       onRenderFramePre={showClusters ? undefined : onRenderFramePre as any}
+      minZoom={showClusters ? undefined : 0.5}
+      onEngineStop={handleEngineStop}
       nodePointerAreaPaint={(node, color, ctx) => {
         const gNode = node as unknown as GraphNode;
         if (gNode.isClusterNode) {
