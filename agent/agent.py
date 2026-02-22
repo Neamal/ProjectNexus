@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 from openai import OpenAI
@@ -16,14 +17,15 @@ from config import OPENROUTER_API_KEY, OPENROUTER_MODEL
 from graph import (
     get_driver,
     ensure_constraints,
-    upsert_person,
+    upsert_persons,
     append_comment,
     append_comment_batch,
     append_comment_recipient_pairs,
-    increment_email_count,
+    increment_email_count_batch,
     get_all_edges,
     get_comments,
     set_summary,
+    set_summary_batch,
 )
 
 client = OpenAI(
@@ -83,8 +85,22 @@ SYSTEM_PROMPT = """\
 You are a relationship-extraction agent. You will receive an email chain and \
 a list of email addresses that appear in it.
 
-Your job: analyse the email chain and identify relationships between the \
-people involved.
+Your goal: help reveal **fraud and suspicious activity** by identifying relationships \
+and dynamics that matter for that purpose. Analyse the chain and record only \
+**professionally significant** relationships, with special attention to what is **suspicious**.
+
+What is suspicious (prioritise these when present):
+- Pressure, urgency, or instructions to act without normal checks (e.g. "wire today", "don't tell anyone").
+- Secrecy, off-the-books arrangements, or avoiding written records.
+- Unusual money movement, payments, or accounting (e.g. kickbacks, inflated invoices, shell entities).
+- Insider or non-public information being shared inappropriately (e.g. tips, advance notice).
+- Fake or misleading documents, identities, or credentials.
+- Coordination to mislead others (e.g. front-running, cover-ups, false narratives).
+- Delegation or reporting that suggests a hidden chain of control or enablers.
+- Conflict, distrust, or escalation that hints at wrongdoing (e.g. threats, disputes over proceeds).
+
+Also record other important dynamics (collaboration, delegation, reporting, conflict) that \
+reveal roles or power, even when not obviously fraudulent—they can connect to fraud later.
 
 Tools:
 - `add_relationship_comment`: one (from_email, to_email, comment). Use for a single pair \
@@ -95,16 +111,51 @@ Tools:
 
 Guidelines:
 - Only use email addresses from the provided list.
+- **Record only important, actionable relationship dynamics** (especially suspicious ones). \
+  Do NOT add relationships for: routine FYI, out-of-office, single logistical reply, \
+  trivial one-off mentions, or when there is no substantive or suspicious dynamic.
+- If there are **no** such significant or suspicious relationships in the chain, do not call any tools. \
+  Respond with a brief summary only (e.g. "No significant or suspicious relationship dynamics in this chain.").
+- Extract at most 5–7 of the most important (and suspicious, when present) observations per chain; skip the rest.
 - Prefer the batch tool when one sender emailed many people with the same observation.
-- Focus on professional dynamics: collaboration, delegation, disagreement, \
-  mentorship, reporting, etc.
-- Be specific and ground observations in the email content.
-- When you have extracted all insights, stop calling tools and respond with \
+- Be specific and ground observations in the email content; for suspicious behaviour, note what was said or implied.
+- When you have extracted all relevant insights, stop calling tools and respond with \
   a brief summary of what you found.\
 """
 
 # Match email addresses in chain text (e.g. FROM/TO lines in CSV-style chains).
 EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+
+# Triage: skip chains that are unlikely to have significant relationships.
+MIN_ADDRESSES_FOR_TRIAGE = 2
+MIN_BODY_LENGTH = 150
+SKIP_PATTERNS = re.compile(
+    r"out of office|ooo|automatic reply|auto-reply|unsubscribe|no-reply@|do not reply|mailer-daemon",
+    re.IGNORECASE,
+)
+MAX_AGENT_ROUNDS = 5
+
+# summarize_edges: parallel LLM calls and batch Neo4j writes
+MAX_SUMMARY_WORKERS = 8
+SUMMARY_WRITE_BATCH_SIZE = 25
+
+
+def should_process_chain(chain_text: str) -> bool:
+    """
+    Return False if the chain is clearly low-value (trivial, automated, or too small).
+    Uses heuristics only; no LLM call.
+    """
+    addresses = parse_emails_from_chain(chain_text)
+    if len(addresses) < MIN_ADDRESSES_FOR_TRIAGE:
+        return False
+    if SKIP_PATTERNS.search(chain_text):
+        return False
+    # Rough body length: strip common header lines, count the rest
+    body = re.sub(r"^(From:|To:|Cc:|Subject:)\s*.*$", "", chain_text, flags=re.MULTILINE)
+    body = re.sub(r"---+\s*", "", body)
+    if len(body.strip()) < MIN_BODY_LENGTH:
+        return False
+    return True
 
 
 def parse_emails_from_chain(chain_text: str) -> list[str]:
@@ -116,10 +167,13 @@ def run_agent_from_chain_text(chain_text: str) -> str:
     """
     Run the agent on a single email chain string (e.g. chain_text from your CSV).
     Parses email addresses from the chain and calls run_agent.
+    Skips chains that fail triage (should_process_chain).
     """
     addresses = parse_emails_from_chain(chain_text)
     if not addresses:
         return "(no email addresses found in chain)"
+    if not should_process_chain(chain_text):
+        return "(skipped: chain unlikely to have significant relationships)"
     return run_agent(addresses, chain_text)
 
 
@@ -133,8 +187,7 @@ def run_agent(email_addresses: list[str], email_chain: str) -> str:
     ensure_constraints(driver)
 
     with driver.session() as session:
-        for email in email_addresses:
-            session.execute_write(upsert_person, email)
+        session.execute_write(upsert_persons, email_addresses)
 
     address_list = "\n".join(f"- {addr}" for addr in email_addresses)
     user_message = (
@@ -148,8 +201,10 @@ def run_agent(email_addresses: list[str], email_chain: str) -> str:
     ]
 
     modified_pairs: set[tuple[str, str]] = set()
+    round_count = 0
 
-    while True:
+    while round_count < MAX_AGENT_ROUNDS:
+        round_count += 1
         response = client.chat.completions.create(
             model=OPENROUTER_MODEL,
             messages=messages,
@@ -200,10 +255,11 @@ def run_agent(email_addresses: list[str], email_chain: str) -> str:
                 "content": json.dumps(tool_result),
             })
 
-    # Increment email_count once per modified pair for this email chain
-    with driver.session() as session:
-        for pair in modified_pairs:
-            session.execute_write(increment_email_count, pair[0], pair[1])
+    # Increment email_count once per modified pair for this email chain (one transaction)
+    if modified_pairs:
+        pairs_list = list(modified_pairs)
+        with driver.session() as session:
+            session.execute_write(increment_email_count_batch, pairs_list)
 
     driver.close()
 
@@ -212,15 +268,45 @@ def run_agent(email_addresses: list[str], email_chain: str) -> str:
     return summary
 
 
-def summarize_edges(emails: Optional[list[str]] = None) -> int:
+def _summarize_one_edge(edge: dict) -> tuple[str, str, str] | None:
+    """Call LLM for one edge; return (email_a, email_b, summary) or None on failure."""
+    comments = edge.get("comments") or []
+    if not comments:
+        return None
+    comment_text = "\n".join(f"- {c}" for c in comments)
+    prompt = (
+        f"Below are observations about the relationship between "
+        f"{edge['email_a']} and {edge['email_b']}:\n\n"
+        f"{comment_text}\n\n"
+        f"Write a 1-2 sentence summary of their overall relationship."
+    )
+    try:
+        response = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        summary = (response.choices[0].message.content or "").strip()
+        if not summary:
+            return None
+        return (edge["email_a"], edge["email_b"], summary)
+    except Exception:
+        return None
+
+
+def summarize_edges(
+    emails: Optional[list[str]] = None,
+    skip_existing: bool = True,
+    max_workers: int = MAX_SUMMARY_WORKERS,
+) -> int:
     """
     Generate LLM summaries for edges that have comments.
 
-    If `emails` is provided, only summarize edges involving those addresses.
+    - If `emails` is provided, only summarize edges involving those addresses.
+    - If `skip_existing` is True (default), edges that already have a summary are skipped.
+    - `max_workers` limits concurrent LLM calls (default 8); lower if you hit rate limits.
     Returns the number of edges summarized.
     """
     driver = get_driver()
-    count = 0
 
     with driver.session() as session:
         edges = session.execute_read(get_all_edges)
@@ -229,31 +315,39 @@ def summarize_edges(emails: Optional[list[str]] = None) -> int:
         email_set = set(emails)
         edges = [e for e in edges if e["email_a"] in email_set or e["email_b"] in email_set]
 
-    for edge in edges:
-        comments = edge["comments"]
-        if not comments:
-            continue
+    if skip_existing:
+        edges = [e for e in edges if not (e.get("summary") or "").strip()]
+    to_process = [e for e in edges if e.get("comments")]
 
-        comment_text = "\n".join(f"- {c}" for c in comments)
-        prompt = (
-            f"Below are observations about the relationship between "
-            f"{edge['email_a']} and {edge['email_b']}:\n\n"
-            f"{comment_text}\n\n"
-            f"Write a 1-2 sentence summary of their overall relationship."
-        )
+    if not to_process:
+        driver.close()
+        print("No edges to summarize.")
+        return 0
 
-        response = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-        )
+    count = 0
+    batch: list[tuple[str, str, str]] = []
 
-        summary = response.choices[0].message.content.strip()
+    def flush_batch():
+        nonlocal count
+        if not batch:
+            return
         with driver.session() as session:
-            session.execute_write(set_summary, edge["email_a"], edge["email_b"], summary)
+            session.execute_write(set_summary_batch, batch)
+        count += len(batch)
+        for a, b, _ in batch:
+            print(f"  Summarized {a} <-> {b}")
+        batch.clear()
 
-        print(f"  Summarized {edge['email_a']} <-> {edge['email_b']}")
-        count += 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_summarize_one_edge, edge): edge for edge in to_process}
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                batch.append(result)
+                if len(batch) >= SUMMARY_WRITE_BATCH_SIZE:
+                    flush_batch()
 
+    flush_batch()
     driver.close()
     print(f"Summarized {count} edge(s).")
     return count
