@@ -104,6 +104,7 @@ export default function App() {
   const [expandedCluster, setExpandedCluster] = useState<number | null>(null);
   const [reclustering, setReclustering] = useState(false);
   const [layoutSignal, setLayoutSignal] = useState(0);
+  const [boxSelectMode, setBoxSelectMode] = useState(false);
 
   useEffect(() => {
     fetchGraph().then((data) => {
@@ -245,6 +246,7 @@ export default function App() {
     setLastSelected(null);
     setSelectedEdge(null);
     setExpandedCluster(null);
+    setBoxSelectMode(false);
     if (fullGraphData) setGraphData(fullGraphData);
   };
 
@@ -331,7 +333,23 @@ export default function App() {
               Respace layout
             </button>
             <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 11, color: "#64748b" }}>Drag corkboard to select nodes</span>
+              <button
+                onClick={() => setBoxSelectMode(!boxSelectMode)}
+                style={{
+                  padding: "4px 8px",
+                  fontSize: 11,
+                  background: boxSelectMode ? "#6366f1" : "transparent",
+                  color: boxSelectMode ? "#fff" : "#94a3b8",
+                  border: `1px solid ${boxSelectMode ? "#6366f1" : "#475569"}`,
+                  borderRadius: 4,
+                  cursor: "pointer",
+                }}
+              >
+                {boxSelectMode ? "Box Select: ON" : "Box Select: OFF"}
+              </button>
+              <span style={{ fontSize: 11, color: "#64748b" }}>
+                {boxSelectMode ? "Drag to select nodes" : "Turn on to marquee select"}
+              </span>
             </div>
           </div>
         )}
@@ -473,6 +491,7 @@ export default function App() {
             height={window.innerHeight}
             showClusters={viewMode === "clusters"}
             resetLayoutSignal={layoutSignal}
+            boxSelectEnabled={boxSelectMode}
           />
         ) : (
           !error && <p style={{ padding: 40 }}>Loading graph...</p>

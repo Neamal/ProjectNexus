@@ -59,6 +59,7 @@ interface Props {
   height: number;
   showClusters?: boolean;
   resetLayoutSignal?: number;
+  boxSelectEnabled?: boolean;
 }
 
 export default function GraphView({
@@ -73,6 +74,7 @@ export default function GraphView({
   height,
   showClusters = false,
   resetLayoutSignal,
+  boxSelectEnabled = false,
 }: Props) {
   const fgRef = useRef<ForceGraphMethods<NodeObject>>(undefined);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -302,6 +304,7 @@ export default function GraphView({
   }, [nodes, selectedNodes]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if (!boxSelectEnabled) return;
     if (containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
@@ -311,6 +314,10 @@ export default function GraphView({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
+    if (!boxSelectEnabled && selectionBox) {
+      setSelectionBox(null);
+      return;
+    }
     if (selectionBox && containerRef.current) {
       const rect = containerRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left;
@@ -321,20 +328,22 @@ export default function GraphView({
 
   const handleMouseUp = () => {
     if (selectionBox) {
-      const { x1, y1, x2, y2 } = selectionBox;
-      // Only trigger selection if the box has some size (prevent mis-clicks)
-      const dist = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
-      if (dist > 5) {
-        const fg = fgRef.current;
-        if (fg) {
-          const selectedIds: string[] = [];
-          nodes.forEach((node: any) => {
-            const { x, y } = fg.graph2ScreenCoords(node.x, node.y);
-            if (x >= Math.min(x1, x2) && x <= Math.max(x1, x2) && y >= Math.min(y1, y2) && y <= Math.max(y1, y2)) {
-              selectedIds.push(node.id);
-            }
-          });
-          onNodesSelect(selectedIds);
+      if (boxSelectEnabled) {
+        const { x1, y1, x2, y2 } = selectionBox;
+        // Only trigger selection if the box has some size (prevent mis-clicks)
+        const dist = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+        if (dist > 5) {
+          const fg = fgRef.current;
+          if (fg) {
+            const selectedIds: string[] = [];
+            nodes.forEach((node: any) => {
+              const { x, y } = fg.graph2ScreenCoords(node.x, node.y);
+              if (x >= Math.min(x1, x2) && x <= Math.max(x1, x2) && y >= Math.min(y1, y2) && y <= Math.max(y1, y2)) {
+                selectedIds.push(node.id);
+              }
+            });
+            onNodesSelect(selectedIds);
+          }
         }
       }
       setSelectionBox(null);

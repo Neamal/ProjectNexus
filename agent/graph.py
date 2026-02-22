@@ -3,6 +3,19 @@ from __future__ import annotations
 from neo4j import GraphDatabase
 from config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
 
+def email_to_name(email: str) -> str:
+    global _aliases
+    if _aliases is None:
+        _aliases = {}
+        possible_paths = ["agent/aliases.json", "aliases.json"]
+        for p in possible_paths:
+            if os.path.exists(p):
+                with open(p, "r") as f:
+                    _aliases = json.load(f)
+                break
+    return _aliases.get(email, email)
+
+
 
 def normalize_pair(a: str, b: str) -> tuple[str, str]:
     """Return emails in sorted order so undirected edges always match."""
@@ -22,35 +35,37 @@ def ensure_constraints(driver):
         )
 
 
-def upsert_person(tx, email: str, name: str = None):
-    if name:
-        tx.run(
-            "MERGE (p:Person {email: $email}) "
-            "ON CREATE SET p.name = $name "
-            "ON MATCH SET p.name = $name",
-            email=email, name=name
-        )
-    else:
-        tx.run("MERGE (p:Person {email: $email})", email=email)
+# def upsert_person(tx, email: str, name: str = None):
+#     if name:
+#         tx.run(
+#             "MERGE (p:Person {email: $email}) "
+#             "ON CREATE SET p.name = $name "
+#             "ON MATCH SET p.name = $name",
+#             email=email, name=name
+#         )
+#     else:
+#         tx.run("MERGE (p:Person {email: $email})", email=email)
 
 
-def upsert_persons(tx, email_names: dict[str, str]) -> None:
-    """Upsert all given emails as Person nodes in one transaction, adding names if provided."""
-    for email, name in email_names.items():
-        if name:
-            tx.run(
-                "MERGE (p:Person {email: $email}) "
-                "ON CREATE SET p.name = $name "
-                "ON MATCH SET p.name = $name",
-                email=email, name=name
-            )
-        else:
-            tx.run("MERGE (p:Person {email: $email})", email=email)
+# def upsert_persons(tx, email_names: dict[str, str]) -> None:
+#     """Upsert all given emails as Person nodes in one transaction, adding names if provided."""
+#     for email, name in email_names.items():
+#         if name:
+#             tx.run(
+#                 "MERGE (p:Person {email: $email}) "
+#                 "ON CREATE SET p.name = $name "
+#                 "ON MATCH SET p.name = $name",
+#                 email=email, name=name
+#             )
+#         else:
+#             tx.run("MERGE (p:Person {email: $email})", email=email)
 
 
 def append_comment(tx, email_a: str, email_b: str, comment: str):
     """Normalize pair order, MERGE edge, append comment to list."""
     lo, hi = normalize_pair(email_a, email_b)
+    lo = email_to_name(lo)
+    hi = email_to_name(hi)
     tx.run(
         "MATCH (a:Person {email: $lo}), (b:Person {email: $hi}) "
         "MERGE (a)-[r:COMMUNICATES_WITH]-(b) "
@@ -73,7 +88,9 @@ def append_comment_cross(
     """
     seen: set[tuple[str, str]] = set()
     for a in a_emails:
+        a = email_to_name(a)
         for b in b_emails:
+            b = email_to_name(b)
             if a == b:
                 continue
             pair = normalize_pair(a, b)
