@@ -102,9 +102,8 @@ export default function App() {
   const [lastSelected, setLastSelected] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("graph");
+  const [viewMode, _setViewMode] = useState<ViewMode>("graph");
   const [expandedCluster, setExpandedCluster] = useState<number | null>(null);
-  const [reclustering, setReclustering] = useState(false);
   const [layoutSignal, setLayoutSignal] = useState(0);
   const [boxSelectMode, setBoxSelectMode] = useState(false);
   const [showComments, setShowComments] = useState(false);
@@ -410,33 +409,6 @@ export default function App() {
     setLayoutSignal(s => s + 1);
   };
 
-  const handleRecluster = async () => {
-    setReclustering(true);
-    setError(null);
-    try {
-      const full = await fetchGraph(true);
-      setFullGraphData(full);
-      setGraphData(full);
-      setSelectedNodes(new Set());
-      setLastSelected(null);
-      setSelectedEdge(null);
-      setExpandedCluster(null);
-    } catch {
-      setError("Recluster failed. Is OPENROUTER_API_KEY set on the backend?");
-    } finally {
-      setReclustering(false);
-    }
-  };
-
-  const handleViewModeChange = (mode: ViewMode) => {
-    setViewMode(mode);
-    setSelectedNodes(new Set());
-    setLastSelected(null);
-    setSelectedEdge(null);
-    setExpandedCluster(null);
-    setBoxSelectMode(false);
-    if (fullGraphData) setGraphData(fullGraphData);
-  };
 
   const handleChatSend = async (question: string) => {
     setChatError(null);
