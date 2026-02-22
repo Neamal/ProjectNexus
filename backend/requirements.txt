@@ -7,3 +7,6 @@ scikit-learn>=1.0
 networkx>=3.0
 python-louvain>=0.0
 openai==1.*
+pinecone-client==5.*
+sentence-transformers>=2.7.0
+torch
