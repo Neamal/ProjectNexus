@@ -700,6 +700,39 @@ export default function App() {
           </div>
         )}
 
+        {/* Multi-select actions (shown when 2+ nodes are selected) */}
+        {selectedNodes.size > 1 && (
+          <div style={{ marginBottom: 16 }}>
+            <p style={{ fontSize: 13, color: "#94a3b8" }}>{selectedNodes.size} nodes selected</p>
+            <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+              <button
+                onClick={handleHideSelected}
+                style={{ padding: "4px 8px", fontSize: 11, background: "#475569", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}
+              >
+                Hide selected
+              </button>
+              <button
+                onClick={handleShowSelected}
+                style={{ padding: "4px 8px", fontSize: 11, background: "#475569", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}
+              >
+                Show selected
+              </button>
+              <button
+                onClick={handleShowOnly}
+                style={{ padding: "4px 8px", fontSize: 11, background: "#475569", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}
+              >
+                Show only
+              </button>
+              <button
+                onClick={handleShowEverything}
+                style={{ padding: "4px 8px", fontSize: 11, background: "#475569", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}
+              >
+                Show everything
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Standalone relationship panel (shown when a link is clicked with multiple nodes selected) */}
         {selectedEdge && selectedNodes.size !== 1 && (() => {
           const srcName = graphData?.nodes.find(n => n.email === selectedEdge.source)?.name ?? selectedEdge.source;
