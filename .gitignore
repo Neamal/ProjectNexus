@@ -9,3 +9,7 @@ neo4j_data/
 *.csv
 *.parquet
 .venv/
+venv/
+
+raw_data/
+.bashrc

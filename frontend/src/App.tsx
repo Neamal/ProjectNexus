@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo } from "react";
 import GraphView from "./GraphView";
 import { fetchGraph, fetchSubgraph, fetchMeta, type GraphData, type MetaData, type Edge } from "./api";
 
-const CLUSTER_COLORS = ["#6366f1","#f97316","#22c55e","#ec4899","#06b6d4","#eab308","#a855f7","#ef4444","#14b8a6","#f59e0b"];
+const CLUSTER_COLORS = ["#6366f1", "#f97316", "#22c55e", "#ec4899", "#06b6d4", "#eab308", "#a855f7", "#ef4444", "#14b8a6", "#f59e0b"];
 
 type ViewMode = "graph" | "clusters";
 
@@ -21,12 +21,25 @@ function toGraphNodes(data: GraphData) {
 }
 
 function toGraphLinks(data: GraphData) {
-  return data.edges.map((e) => ({
-    source: e.source,
-    target: e.target,
-    count: (e.properties?.email_count as number) ?? 1,
-    summary: (e.properties?.summary as string) ?? "",
-  }));
+  const map = new Map<string, any>();
+  data.edges.forEach((e) => {
+    const key = [e.source, e.target].sort().join("<->");
+    const count = (e.properties?.email_count as number) ?? 1;
+    if (map.has(key)) {
+      map.get(key).count += count;
+      if (e.properties?.summary && !map.get(key).summary.includes(e.properties.summary)) {
+        map.get(key).summary += " | " + e.properties.summary;
+      }
+    } else {
+      map.set(key, {
+        source: e.source,
+        target: e.target,
+        count,
+        summary: (e.properties?.summary as string) ?? "",
+      });
+    }
+  });
+  return Array.from(map.values());
 }
 
 /**
@@ -83,20 +96,33 @@ export default function App() {
   const [fullGraphData, setFullGraphData] = useState<GraphData | null>(null);
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [meta, setMeta] = useState<MetaData | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selectedNodes, setSelectedNodes] = useState<Set<string>>(new Set());
+  const [lastSelected, setLastSelected] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("graph");
   const [expandedCluster, setExpandedCluster] = useState<number | null>(null);
   const [reclustering, setReclustering] = useState(false);
+  const [layoutSignal, setLayoutSignal] = useState(0);
 
   useEffect(() => {
     fetchGraph().then((data) => {
       setFullGraphData(data);
       setGraphData(data);
     }).catch(() => setError("Could not connect to API. Is the backend running?"));
-    fetchMeta().then(setMeta).catch(() => {});
+    fetchMeta().then(setMeta).catch(() => { });
   }, []);
+
+  // Handle global escape key to return to full graph
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        handleReset();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [fullGraphData]); // Only depends on fullGraphData which is stable
 
   // Compute the displayed nodes/links based on view mode
   const displayData = useMemo(() => {
@@ -123,26 +149,52 @@ export default function App() {
     return { nodes, links };
   }, [graphData, viewMode, expandedCluster]);
 
-  const handleNodeClick = async (id: string) => {
+  const handleNodeClick = async (id: string, isShift: boolean) => {
     if (viewMode === "clusters" && id.startsWith("cluster-")) {
       const clusterId = parseInt(id.replace("cluster-", ""), 10);
       setExpandedCluster(clusterId);
-      setSelected(null);
+      setSelectedNodes(new Set());
+      setLastSelected(null);
       setSelectedEdge(null);
       return;
     }
 
-    setSelected(id);
-    setSelectedEdge(null);
-
-    if (viewMode === "graph") {
-      try {
-        const sub = await fetchSubgraph(id, 2);
-        setGraphData(sub);
-      } catch {
-        setError("Failed to load subgraph");
-      }
+    if (isShift) {
+      setSelectedNodes(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    } else {
+      setSelectedNodes(new Set([id]));
     }
+    setLastSelected(id);
+    setSelectedEdge(null);
+  };
+
+  const handleLoadSubgraph = async () => {
+    if (!lastSelected) return;
+    try {
+      const sub = await fetchSubgraph(lastSelected, 2);
+      setGraphData(sub);
+      setSelectedNodes(new Set([lastSelected]));
+    } catch {
+      setError("Failed to load subgraph");
+    }
+  };
+
+
+  const handleNodesSelect = (ids: string[]) => {
+    setSelectedNodes(new Set(ids));
+    if (ids.length > 0) setLastSelected(ids[ids.length - 1]);
+    setSelectedEdge(null);
+  };
+
+  const handleBackgroundClick = () => {
+    setSelectedNodes(new Set());
+    setLastSelected(null);
+    setSelectedEdge(null);
   };
 
   const handleLinkClick = (source: string, target: string) => {
@@ -156,7 +208,8 @@ export default function App() {
   };
 
   const handleReset = async () => {
-    setSelected(null);
+    setSelectedNodes(new Set());
+    setLastSelected(null);
     setSelectedEdge(null);
     setExpandedCluster(null);
     try {
@@ -175,7 +228,8 @@ export default function App() {
       const full = await fetchGraph(true);
       setFullGraphData(full);
       setGraphData(full);
-      setSelected(null);
+      setSelectedNodes(new Set());
+      setLastSelected(null);
       setSelectedEdge(null);
       setExpandedCluster(null);
     } catch {
@@ -187,7 +241,8 @@ export default function App() {
 
   const handleViewModeChange = (mode: ViewMode) => {
     setViewMode(mode);
-    setSelected(null);
+    setSelectedNodes(new Set());
+    setLastSelected(null);
     setSelectedEdge(null);
     setExpandedCluster(null);
     if (fullGraphData) setGraphData(fullGraphData);
@@ -259,6 +314,25 @@ export default function App() {
             >
               {reclustering ? "Reclustering…" : "Recluster (LLM names)"}
             </button>
+            <button
+              onClick={() => setLayoutSignal((s) => s + 1)}
+              style={{
+                marginTop: 8,
+                marginLeft: 8,
+                padding: "6px 12px",
+                fontSize: 12,
+                background: "#334155",
+                color: "#e2e8f0",
+                border: "1px solid #475569",
+                borderRadius: 6,
+                cursor: "pointer",
+              }}
+            >
+              Respace layout
+            </button>
+            <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "#64748b" }}>Drag corkboard to select nodes</span>
+            </div>
           </div>
         )}
 
@@ -278,16 +352,30 @@ export default function App() {
           </div>
         )}
 
-        {selected && (
+        {(lastSelected || graphData !== fullGraphData) && (
           <div style={{ marginBottom: 16 }}>
-            <p style={{ fontSize: 13, color: "#94a3b8" }}>Focused on:</p>
-            <p style={{ fontWeight: 600, color: "#f97316" }}>{selected}</p>
-            <button
-              onClick={handleReset}
-              style={{ marginTop: 8, padding: "6px 12px", fontSize: 13, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, cursor: "pointer" }}
-            >
-              Show full graph
-            </button>
+            {lastSelected && (
+              <>
+                <p style={{ fontSize: 13, color: "#94a3b8" }}>Focused on:</p>
+                <p style={{ fontWeight: 600, color: "#f97316" }}>{lastSelected}</p>
+                {viewMode === "graph" && (
+                  <button
+                    onClick={handleLoadSubgraph}
+                    style={{ marginTop: 8, padding: "6px 12px", fontSize: 13, background: "#334155", color: "#e2e8f0", border: "1px solid #475569", borderRadius: 6, cursor: "pointer", width: "100%" }}
+                  >
+                    View connection network
+                  </button>
+                )}
+              </>
+            )}
+            {graphData !== fullGraphData && (
+              <button
+                onClick={handleReset}
+                style={{ marginTop: 8, padding: "6px 12px", fontSize: 13, background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 6, cursor: "pointer", width: "100%" }}
+              >
+                Show full graph
+              </button>
+            )}
           </div>
         )}
 
@@ -350,8 +438,8 @@ export default function App() {
               {meta.degrees.map((d) => (
                 <li
                   key={d.email}
-                  onClick={() => handleNodeClick(d.email)}
-                  style={{ padding: "4px 0", cursor: "pointer", color: d.email === selected ? "#f97316" : "#cbd5e1" }}
+                  onClick={() => handleNodeClick(d.email, false)}
+                  style={{ padding: "4px 0", cursor: "pointer", color: selectedNodes.has(d.email) ? "#f97316" : "#cbd5e1" }}
                 >
                   <span style={{ fontWeight: 500 }}>{d.name || d.email}</span>
                   {d.name && d.email && (
@@ -376,12 +464,15 @@ export default function App() {
           <GraphView
             nodes={displayData.nodes}
             links={displayData.links}
-            selectedNode={selected}
+            selectedNodes={selectedNodes}
             onNodeClick={handleNodeClick}
+            onNodesSelect={handleNodesSelect}
             onLinkClick={handleLinkClick}
+            onBackgroundClick={handleBackgroundClick}
             width={window.innerWidth - 280}
             height={window.innerHeight}
             showClusters={viewMode === "clusters"}
+            resetLayoutSignal={layoutSignal}
           />
         ) : (
           !error && <p style={{ padding: 40 }}>Loading graph...</p>
